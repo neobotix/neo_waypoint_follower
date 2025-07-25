@@ -1,4 +1,9 @@
+
 # neo_waypoint_follower
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/aab52775-912b-4804-831a-cca1ad2c0df8" alt="neo_waypoint_follower demo" width="600"/>
+</p>
 
 
 ## Overview
