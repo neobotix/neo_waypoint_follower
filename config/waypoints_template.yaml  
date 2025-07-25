@@ -1,0 +1,30 @@
+# waypoints_template.yaml
+# Template for defining waypoints.
+# Copy this file and fill in your own waypoints.
+# Each waypoint has a unique name, position (x, y, z) and orientation (x, y, z, w).
+# Make sure the name of each waypoint follows the convention 'wp_n', where n is the index (e.g., wp_1, wp_2) 
+# This is required for compatibility with nav2.
+waypoints:
+    # wp_1:
+    #   position:
+    #     x: 0.0
+    #     y: 0.0
+    #     z: 0.0
+    #   orientation:
+    #     x: 0.0
+    #     y: 0.0
+    #     z: 0.0
+    #     w: 1.0
+
+    # wp_2:
+    #   position:
+    #     x: 1.0
+    #     y: 2.0
+    #     z: 0.0
+    #   orientation:
+    #     x: 0.0
+    #     y: 0.0
+    #     z: 0.707
+    #     w: 0.707
+
+    # Add more waypoints as needed following the above structure.

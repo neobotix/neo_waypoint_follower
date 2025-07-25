@@ -11,7 +11,8 @@ import os
 
 def execution_stage(context, 
                     waypoints_topic, 
-                    waypoints_yaml, 
+                    save_waypoints_path, 
+                    load_waypoints_path, 
                     frame_id, 
                     repeat_count, 
                     wait_at_waypoint_ms, 
@@ -19,7 +20,8 @@ def execution_stage(context,
                     ):
 
     waypoints_topic_val = str(waypoints_topic.perform(context))
-    waypoints_yaml_val = str(waypoints_yaml.perform(context))
+    save_waypoints_path_val = str(save_waypoints_path.perform(context))
+    load_waypoints_path_val = str(load_waypoints_path.perform(context))
     frame_id_val = frame_id.perform(context)
     repeat_count_val = int(repeat_count.perform(context))
     wait_at_waypoint_ms_val = int(wait_at_waypoint_ms.perform(context))
@@ -32,7 +34,7 @@ def execution_stage(context,
         output='screen',
         parameters=[{
             'waypoints_topic': waypoints_topic_val,
-            'output_file': waypoints_yaml_val
+            'output_file': save_waypoints_path_val
         }]
     )
 
@@ -42,7 +44,7 @@ def execution_stage(context,
         name='waypoint_looper',
         output='screen',
         parameters=[{
-            'yaml_file': waypoints_yaml_val,
+            'yaml_file': load_waypoints_path_val,
             'frame_id': frame_id_val,
             'repeat_count': repeat_count_val,
             'wait_at_waypoint_ms': wait_at_waypoint_ms_val,
@@ -55,6 +57,7 @@ def execution_stage(context,
         waypoint_looper_node
     ]
 
+
 def generate_launch_description():
 
     # Declare launch arguments
@@ -63,14 +66,24 @@ def generate_launch_description():
         description='Topic to listen to for waypoints'
     )
 
-    declare_waypoints_yaml = DeclareLaunchArgument(
-        'waypoints_yaml',
+    declare_save_waypoints_path = DeclareLaunchArgument(
+        'save_waypoints_path',
         default_value=os.path.join(
             get_package_share_directory('neo_waypoint_follower'),
             'config',
             'waypoints.yaml'
         ),
-        description='Path to save the waypoints YAML file'
+        description='Path to save waypoints YAML file'
+    )
+
+    declare_load_waypoints_path = DeclareLaunchArgument(
+        'load_waypoints_path',
+        default_value=os.path.join(
+            get_package_share_directory('neo_waypoint_follower'),
+            'config',
+            'waypoints.yaml'
+        ),
+        description='Path to load waypoints YAML file for looping'
     )
 
     declare_frame_id = DeclareLaunchArgument(
@@ -96,7 +109,8 @@ def generate_launch_description():
     opq_function = OpaqueFunction(function=execution_stage,
                                   args=[
                                       LaunchConfiguration('waypoints_topic'),
-                                      LaunchConfiguration('waypoints_yaml'),
+                                      LaunchConfiguration('save_waypoints_path'),
+                                      LaunchConfiguration('load_waypoints_path'),
                                       LaunchConfiguration('frame_id'),
                                       LaunchConfiguration('repeat_count'),
                                       LaunchConfiguration('wait_at_waypoint_ms'),
@@ -105,7 +119,8 @@ def generate_launch_description():
 
     return LaunchDescription([
         declare_waypoints_topic,
-        declare_waypoints_yaml,
+        declare_save_waypoints_path,
+        declare_load_waypoints_path,
         declare_frame_id,
         declare_repeat_count,
         declare_wait_at_waypoint_ms,
