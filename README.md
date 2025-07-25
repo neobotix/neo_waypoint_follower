@@ -67,21 +67,55 @@ ros2 launch neo_waypoint_follower waypoint_follower_launch.py repeat_count:=10 w
 
 ---
 
+
 ## Usage
 
-1. **Start the launch file** as above.
-2. **Add waypoints in RViz using the Navigation2 Panel.**  
+### 1. Launch the Simulation and Navigation Stack
+
+Open separate terminals and run the following commands in order:
+
+**a. Launch the simulation:**
+```sh
+ros2 launch rox_bringup bringup_sim_launch.py
+```
+
+**b. Launch the navigation stack (with simulation time):**
+```sh
+ros2 launch rox_navigation navigation.launch.py use_sim_time:=True
+```
+
+**c. Launch RViz:**
+```sh
+ros2 launch neo_nav2_bringup rviz_launch.py
+```
+
+**d. Launch the waypoint follower (with example arguments):**
+```sh
+ros2 launch neo_waypoint_follower waypoint_follower_launch.py repeat_count:=10 wait_at_waypoint_ms:=1000
+```
+
+You can also load a custom waypoints YAML file by specifying the `load_waypoints_path` launch argument. For example:
+```sh
+ros2 launch neo_waypoint_follower waypoint_follower_launch.py load_waypoints_path:=/home/adarsh/waypoints_test.yaml
+```
+Make sure your custom YAML file follows the template provided in `config/waypoints_template.yaml`.
+
+---
+
+### 2. Add and Use Waypoints
+
+1. **Add waypoints in RViz using the Navigation2 Panel.**  
    First select the `Waypoint / Nav Thru Poses Mode`. Then, when you add waypoints using the `Nav2 Goal` markers, the waypoints are automatically published to the `/waypoints` topic by the Nav2 stack.  
-   Once you have finished marking all desired waypoints in RViz, `do not` choose any options from the Nav2 panel. Proceed to the next step.
-3. **Save waypoints** by calling the service:
+   Once you have finished marking all desired waypoints in RViz, *do not* choose any options from the Nav2 panel. Proceed to the next step.
+2. **Save waypoints** by calling the service:
    ```sh
    ros2 service call /save_waypoints std_srvs/srv/Trigger {}
    ```
-4. **Start waypoint looping**:
+3. **Start waypoint looping**:
    ```sh
    ros2 service call /start_waypoint_loop std_srvs/srv/Trigger {}
    ```
-5. **Stop waypoint looping**:
+4. **Stop waypoint looping**:
    ```sh
    ros2 service call /stop_waypoint_loop std_srvs/srv/Trigger {}
    ```
