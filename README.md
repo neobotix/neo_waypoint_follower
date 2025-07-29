@@ -2,8 +2,7 @@
 # neo_waypoint_follower
 
 
-![neo_waypoint_follower demo](![Image](https://github.com/user-attachments/assets/6da41501-df21-4f98-932c-2310725f0530))
-
+![neo_waypoint_follower demo](https://github.com/user-attachments/assets/6da41501-df21-4f98-932c-2310725f0530)
 
 ## Overview
 
