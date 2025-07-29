@@ -2,7 +2,7 @@
 # neo_waypoint_follower
 
 
-![neo_waypoint_follower demo]([https://github.com/user-attachments/assets/aab52775-912b-4804-831a-cca1ad2c0df8](https://github.com/neobotix/neo_waypoint_follower/blob/main/media/waypoint_loop.gif))
+![neo_waypoint_follower demo](https://github.com/neobotix/neo_waypoint_follower/blob/main/media/waypoint_loop.gif)
 
 
 ## Overview
