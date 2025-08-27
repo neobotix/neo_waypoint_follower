@@ -5,7 +5,7 @@
 
 ## Overview
 
-`neo_waypoint_follower` is a ROS 2 Humble package developed by Neobotix GmbH for waypoint following for Neobotix ROX robots.
+`neo_waypoint_follower` is a ROS 2 package developed by Neobotix GmbH for waypoint following for Neobotix ROX robots.
 
 It provides two core functionalities:
 
@@ -117,10 +117,28 @@ Make sure your custom YAML file follows the template provided in `config/waypoin
    ```sh
    ros2 service call /start_waypoint_loop std_srvs/srv/Trigger {}
    ```
-4. **Stop waypoint looping**:
-   ```sh
-   ros2 service call /stop_waypoint_loop std_srvs/srv/Trigger {}
-   ```
+   More Controls:
+
+  - **Pause then resume:**
+    ```sh
+    ros2 service call /pause_waypoint_loop std_srvs/srv/Trigger {}
+    ros2 service call /resume_waypoint_loop std_srvs/srv/Trigger {}
+    ```
+
+  - **Skip current goal:**
+    ```sh
+    ros2 service call /skip_current_waypoint std_srvs/srv/Trigger {}
+    ```
+
+  - **Cancel & reset (no auto-restart):**
+    ```sh
+    ros2 service call /cancel_waypoint_loop std_srvs/srv/Trigger {}
+    ```
+
+  - **Stop + immediate restart from start:**
+    ```sh
+    ros2 service call /stop_restart_waypoint_loop std_srvs/srv/Trigger {}
+    ```
 
 ## Further Information
 
