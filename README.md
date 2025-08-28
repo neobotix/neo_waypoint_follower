@@ -125,20 +125,11 @@ Make sure your custom YAML file follows the template provided in `config/waypoin
     ros2 service call /resume_waypoint_loop std_srvs/srv/Trigger {}
     ```
 
-  - **Skip current goal:**
-    ```sh
-    ros2 service call /skip_current_waypoint std_srvs/srv/Trigger {}
-    ```
-
   - **Cancel & reset (no auto-restart):**
     ```sh
     ros2 service call /cancel_waypoint_loop std_srvs/srv/Trigger {}
     ```
 
-  - **Stop + immediate restart from start:**
-    ```sh
-    ros2 service call /stop_restart_waypoint_loop std_srvs/srv/Trigger {}
-    ```
 
 ## Further Information
 

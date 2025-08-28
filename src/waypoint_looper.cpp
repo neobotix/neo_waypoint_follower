@@ -1,16 +1,15 @@
-
-// ============================================================================
-// WaypointLooper Control Semantics (ROS 2 style):
-//
-// - Stop: Cancels the current navigation goal and stops the loop immediately.
-// - Pause: Temporarily halts waypoint execution, preserving current progress.
-// - Resume: Continues execution from the paused waypoint and loop index.
-// - Cancel: Aborts the loop and resets all progress; does not auto-restart.
-// - Skip: Advances to the next waypoint, bypassing the current one.
-// - Stop & Restart: Cancels all progress and immediately restarts the loop from the beginning.
-// ============================================================================
-// Neobotix GmbH
-// Author: Adarsh Karan K P
+/**
+ * ============================================================================
+ * WaypointLooper
+ *
+ * - Start: Begins waypoint execution from the first waypoint.
+ * - Pause: Temporarily halts waypoint execution, progress is preserved.
+ * - Resume: Continues execution from the paused waypoint and loop index.
+ * - Cancel: Aborts the loop and resets all progress; does not auto-restart.
+ * ============================================================================
+ * Neobotix GmbH
+ * Author: Adarsh Karan K P
+ */
 
 #include <chrono>
 #include <rclcpp/rclcpp.hpp>
@@ -55,19 +54,16 @@ public:
     cancel_srv_ = create_service<std_srvs::srv::Trigger>(
       "cancel_waypoint_loop",
       std::bind(&WaypointLooper::cancelCallback, this, std::placeholders::_1, std::placeholders::_2));
-
-    skip_srv_ = create_service<std_srvs::srv::Trigger>(
-      "skip_current_waypoint",
-      std::bind(&WaypointLooper::skipCallback, this, std::placeholders::_1, std::placeholders::_2));
-
-    restart_srv_ = create_service<std_srvs::srv::Trigger>(
-      "stop_restart_waypoint_loop",
-      std::bind(&WaypointLooper::stopRestartCallback, this, std::placeholders::_1, std::placeholders::_2));
-
   }
 
 private:
   // services
+  /// \brief Service callback to start waypoint loop execution.
+  ///
+  /// Resets indices, loads waypoints, and begins looping from the first waypoint.
+  ///
+  /// \param req Service request (unused)
+  /// \param res Service response
   void startCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                std::shared_ptr<std_srvs::srv::Trigger::Response> res)
   {
@@ -79,8 +75,6 @@ private:
 
     // clear flags/indices
     paused_ = false;
-    restart_after_cancel_ = false;
-    skip_after_cancel_ = false;
     if (delay_timer_) delay_timer_->cancel();
 
     running_        = true;
@@ -94,6 +88,12 @@ private:
     RCLCPP_INFO(get_logger(), "Waypoint looping started.");
   }
 
+  /// \brief Service callback to pause waypoint loop execution.
+  ///
+  /// Cancels any active goal and preserves progress for resuming.
+  ///
+  /// \param req Service request (unused)
+  /// \param res Service response
   void pauseCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                    std::shared_ptr<std_srvs::srv::Trigger::Response> res)
   {
@@ -109,6 +109,12 @@ private:
     res->message = "Paused";
   }
 
+  /// \brief Service callback to resume waypoint loop execution.
+  ///
+  /// Continues execution from the paused waypoint and loop index.
+  ///
+  /// \param req Service request (unused)
+  /// \param res Service response
   void resumeCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                       std::shared_ptr<std_srvs::srv::Trigger::Response> res)
   {
@@ -122,6 +128,12 @@ private:
     res->message = "Resumed";
   }
 
+  /// \brief Service callback to cancel waypoint loop execution.
+  ///
+  /// Aborts the loop, cancels any active goal, and resets all progress.
+  ///
+  /// \param req Service request (unused)
+  /// \param res Service response
   void cancelCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                       std::shared_ptr<std_srvs::srv::Trigger::Response> res)
   {
@@ -129,8 +141,6 @@ private:
     paused_ = false;
     running_ = false;
     goal_in_flight_ = false;
-    restart_after_cancel_ = false;
-    skip_after_cancel_ = false;
 
     if (current_goal_) {
       auto fut = client_->async_cancel_goal(current_goal_); (void)fut;
@@ -145,59 +155,12 @@ private:
     RCLCPP_INFO(get_logger(), "Waypoint loop canceled and reset.");
   }
 
-  void skipCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
-                    std::shared_ptr<std_srvs::srv::Trigger::Response> res)
-  {
-    if (!running_) { res->success=false; res->message="Not running"; return; }
-    if (paused_)   { res->success=false; res->message="Paused; resume first"; return; }
-
-    if (goal_in_flight_ && current_goal_) {
-      skip_after_cancel_ = true;
-      auto fut = client_->async_cancel_goal(current_goal_); (void)fut;
-      res->success = true; res->message = "Skipping current waypoint...";
-      return;
-    }
-
-    // No goal in flight: just advance and send next
-    ++wp_idx_;
-    sendNext();
-    res->success = true;
-    res->message = "Skipped to next waypoint.";
-  }
-
-  void stopRestartCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
-                          std::shared_ptr<std_srvs::srv::Trigger::Response> res)
-  {
-    if (delay_timer_) delay_timer_->cancel();
-    paused_ = false;
-    restart_after_cancel_ = true;
-    running_ = false;           // temporarily
-    goal_in_flight_ = false;
-
-    if (current_goal_) {
-      auto fut = client_->async_cancel_goal(current_goal_); (void)fut;
-      // result callback will see restart_after_cancel_ and kick fresh start
-    } else {
-      // immediate restart
-      loop_idx_ = 0; wp_idx_ = 0;
-      if (!loadYaml() || waypoints_.empty()) {
-        restart_after_cancel_ = false;
-        res->success=false; res->message="Failed to load YAML or no waypoints."; return;
-      }
-      if (!client_->wait_for_action_server(std::chrono::seconds(5))) {
-        restart_after_cancel_ = false;
-        res->success=false; res->message="NavigateToPose server not up."; return;
-      }
-      running_ = true;
-      sendNext();
-      restart_after_cancel_ = false;
-    }
-
-    res->success = true;
-    res->message = "Stop & restart requested.";
-  }
-
   // yaml
+  /// \brief Load waypoints from YAML file.
+  ///
+  /// Parses the configured YAML file and loads waypoints into memory.
+  ///
+  /// \return True if waypoints loaded successfully, false otherwise.
   bool loadYaml() {
     try {
       YAML::Node root = YAML::LoadFile(yaml_file_);
@@ -232,6 +195,9 @@ private:
   }
 
   // action sequencing
+  /// \brief Send the next waypoint goal to the navigation action server.
+  ///
+  /// Handles sequencing, looping, and delay between waypoints.
   void sendNext()
   {
     if (!running_ || goal_in_flight_ || paused_) return;
@@ -280,30 +246,13 @@ private:
           break;
 
         case rclcpp_action::ResultCode::CANCELED:
-          // clear the handle for safety
-          if (restart_after_cancel_) {
-            restart_after_cancel_ = false;
-            loop_idx_ = 0; wp_idx_ = 0;
-
-            if (!loadYaml() || waypoints_.empty()) { running_ = false; return; }
-            if (!client_->wait_for_action_server(std::chrono::seconds(5))) { running_ = false; return; }
-
-            running_ = true;
-            sendNext();
-            return;
-          }
-          if (skip_after_cancel_) {
-            skip_after_cancel_ = false;
-            ++wp_idx_; // move to next
-            // fall through to send next (if still running)
-          } else if (paused_) {
-            // user pause: do nothing (stay paused at same wp_idx_)
+          if (paused_) {
+            // user paused, so stay at same wp_idx_
             return;
           } else {
-            // external cancel: treat as failure
             RCLCPP_WARN(this->get_logger(), "Goal canceled");
             if (stop_on_fail_) { running_ = false; finish(); return; }
-            else { ++wp_idx_; }
+            else { ++wp_idx_; }  // advance if not stopping on fail
           }
           break;
 
@@ -333,6 +282,7 @@ private:
     client_->async_send_goal(goal, options);
   }
 
+  /// \brief Called when all loops are completed or execution is stopped.
   void finish()
   {
     running_ = false;
@@ -347,8 +297,6 @@ private:
 
   bool running_, goal_in_flight_;
   bool paused_ = false;
-  bool restart_after_cancel_ = false;
-  bool skip_after_cancel_ = false;
 
   size_t repeat_count_, loop_idx_, wp_idx_;
 
@@ -356,11 +304,12 @@ private:
 
   rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr client_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr
-  start_srv_, cancel_srv_, pause_srv_, resume_srv_, skip_srv_, restart_srv_;
+  start_srv_, cancel_srv_, pause_srv_, resume_srv_;
   rclcpp::TimerBase::SharedPtr delay_timer_;
   rclcpp_action::ClientGoalHandle<nav2_msgs::action::NavigateToPose>::SharedPtr current_goal_;
 };
 
+/// \brief Main entry point for the WaypointLooper node.
 int main(int argc, char **argv)
 {
   rclcpp::init(argc, argv);
