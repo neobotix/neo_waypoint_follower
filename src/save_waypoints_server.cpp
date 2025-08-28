@@ -1,5 +1,12 @@
-// Neobotix GmbH
-// Author: Adarsh Karan K P
+/**
+ * ============================================================================
+ * SaveWaypointsServer
+ *
+ * Subscribes to waypoint markers and provides a service to save them to YAML.
+ * ============================================================================
+ * Neobotix GmbH
+ * Author: Adarsh Karan K P
+ */
 
 #include <rclcpp/rclcpp.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
@@ -15,6 +22,9 @@
 class SaveWaypointsServer : public rclcpp::Node
 {
 public:
+  /// \brief Construct a new SaveWaypointsServer node.
+  ///
+  /// Initializes parameters, subscription to waypoint markers, and save service.
   SaveWaypointsServer()
   : Node("save_waypoints_server")
   {
@@ -37,12 +47,23 @@ public:
   }
 
 private:
+  /// \brief Callback for incoming waypoint marker arrays.
+  ///
+  /// Stores the latest marker array for processing when save service is called.
+  ///
+  /// \param msg The received marker array message
   void markersCallback(const visualization_msgs::msg::MarkerArray::SharedPtr msg)
   {
     std::lock_guard<std::mutex> lk(mutex_);
     latest_markers_ = *msg;
   }
 
+  /// \brief Service callback to save waypoints to YAML file.
+  ///
+  /// Extracts waypoints from the latest marker array and saves them to configured file.
+  ///
+  /// \param req Service request (unused)
+  /// \param res Service response containing success status and message
   void handleSave(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
                   std::shared_ptr<std_srvs::srv::Trigger::Response> res)
   {
@@ -114,6 +135,12 @@ private:
     geometry_msgs::msg::Pose pose;
   };
 
+  /// \brief Extract waypoints from visualization marker array.
+  ///
+  /// Matches text markers (waypoint names) with geometric markers (poses) by ID.
+  ///
+  /// \param arr The marker array to process
+  /// \return Map of waypoint names to their poses
   std::map<std::string, geometry_msgs::msg::Pose> extractWaypoints(
       const visualization_msgs::msg::MarkerArray & arr)
   {
@@ -165,6 +192,7 @@ private:
   std::optional<visualization_msgs::msg::MarkerArray> latest_markers_;
 };
 
+/// \brief Main entry point for the SaveWaypointsServer node.
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
