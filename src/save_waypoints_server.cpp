@@ -82,7 +82,11 @@ private:
       // Extract waypoints from markers
       auto data = extractWaypoints(copy);
 
-      std::ofstream fout(output_file_);
+      // Read current output_file param just before writing
+      std::string path = output_file_;
+      (void)this->get_parameter("output_file", path);  // live value
+
+      std::ofstream fout(path);
       if (!fout.is_open()) {
         res->success = false;
         res->message = "Failed to open file for writing. The directory or file may not exist.";
@@ -122,7 +126,7 @@ private:
       fout.close();
 
       res->success = true;
-      res->message = "Saved " + std::to_string(data.size()) + " waypoints to " + output_file_;
+      res->message = "Saved " + std::to_string(data.size()) + " waypoints to " + path;
       RCLCPP_INFO(get_logger(), "%s", res->message.c_str());
     } catch (const std::exception & e) {
       res->success = false;

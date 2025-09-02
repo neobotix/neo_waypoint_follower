@@ -278,7 +278,11 @@ private:
   /// \return True if waypoints loaded successfully, false otherwise.
   bool loadYaml() {
     try {
-      YAML::Node root = YAML::LoadFile(yaml_file_);
+
+      std::string yaml_path = yaml_file_;
+      // use the updated value if file path has been changed at runtime
+      (void)this->get_parameter("yaml_file", yaml_path);
+      YAML::Node root = YAML::LoadFile(yaml_path);
       YAML::Node waypoints = root["waypoints"];
       waypoints_.clear();
 
