@@ -32,6 +32,7 @@
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <rcl_interfaces/msg/integer_range.hpp>
+#include <builtin_interfaces/msg/duration.hpp>
 #include <yaml-cpp/yaml.h>
 
 class WaypointLooper : public rclcpp::Node {
@@ -107,6 +108,9 @@ public:
     auto qos_settings = rclcpp::QoS(1).reliable().transient_local();
     pub_from_start_ = create_publisher<std_msgs::msg::Float64>("/waypoint_loop/distance_from_start", qos_settings);
     pub_from_last_  = create_publisher<std_msgs::msg::Float64>("/waypoint_loop/distance_from_last", qos_settings);
+    pub_eta_sec_ = create_publisher<std_msgs::msg::Float64>("/waypoint_loop/eta_seconds", qos_settings);
+    pub_nav_time_sec_ = create_publisher<std_msgs::msg::Float64>("/waypoint_loop/navigation_time_seconds", qos_settings);
+    pub_distance_remaining_ = create_publisher<std_msgs::msg::Float64>("/waypoint_loop/distance_remaining", qos_settings);
 
     // Parameter change callback. can be updated anytime
     param_callback_handle_ = this->add_on_set_parameters_callback(
@@ -349,6 +353,28 @@ private:
     goal_in_flight_ = true;
 
     auto options = rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SendGoalOptions();
+    
+    options.feedback_callback = 
+      [this](rclcpp_action::ClientGoalHandle<nav2_msgs::action::NavigateToPose>::SharedPtr,
+              const std::shared_ptr<const nav2_msgs::action::NavigateToPose::Feedback> feedback)
+      {
+        std_msgs::msg::Float64 msg;
+        
+        // Convert duration to seconds
+        auto eta_duration = feedback->estimated_time_remaining;
+        double eta_seconds = eta_duration.sec + eta_duration.nanosec / 1e9;
+        msg.data = eta_seconds;
+        pub_eta_sec_->publish(msg);
+        
+        auto nav_duration = feedback->navigation_time;
+        double nav_seconds = nav_duration.sec + nav_duration.nanosec / 1e9;
+        msg.data = nav_seconds;
+        pub_nav_time_sec_->publish(msg);
+        
+        msg.data = feedback->distance_remaining;
+        pub_distance_remaining_->publish(msg);
+      };
+    
     options.goal_response_callback =
       [this](std::shared_ptr<rclcpp_action::ClientGoalHandle<nav2_msgs::action::NavigateToPose>> gh){
         if (!gh) {
@@ -366,6 +392,11 @@ private:
         goal_in_flight_ = false;
         current_goal_.reset();
         publishMetrics_();
+        
+        // Do not zero on user pause (cancel due to pause)
+        if (!(paused_ && result.code == rclcpp_action::ResultCode::CANCELED)) {
+          resetNav2Feedback_();
+        }
 
       switch (result.code) {
         case rclcpp_action::ResultCode::SUCCEEDED:
@@ -432,6 +463,34 @@ private:
     m.data = leg_distance_; pub_from_last_->publish(m);
   }
 
+  /// \brief Publish Nav2 feedback metrics for GUI consumption.
+  void publishNav2Feedback_()
+  {
+    // Will be populated with actual feedback data when feedback is received
+    std_msgs::msg::Float64 msg;
+    
+    // Publish placeholder values. These will be updated in feedback callback
+    msg.data = 0.0;  // eta_seconds default
+    pub_eta_sec_->publish(msg);
+    
+    msg.data = 0.0;  // navigation_time_seconds default  
+    pub_nav_time_sec_->publish(msg);
+    
+    msg.data = 0.0;  // distance_remaining default
+    pub_distance_remaining_->publish(msg);
+  }
+
+  /// \brief Reset Nav2 feedback metrics to zero.
+  void resetNav2Feedback_()
+  {
+    std_msgs::msg::Float64 msg;
+    msg.data = 0.0;
+    
+    pub_eta_sec_->publish(msg);
+    pub_nav_time_sec_->publish(msg);
+    pub_distance_remaining_->publish(msg);
+  }
+
   // limits
   static constexpr int kMaxRepeatCount = 100;
   static constexpr int kMaxWaitAtWaypointMs = 60000;
@@ -464,7 +523,9 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr pub_from_start_;
   rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr pub_from_last_;
-
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr pub_eta_sec_;
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr pub_nav_time_sec_;
+  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr pub_distance_remaining_;
   rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr nav_to_pose_client_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr
   start_srv_, cancel_srv_, pause_srv_, resume_srv_;

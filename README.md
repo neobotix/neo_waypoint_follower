@@ -24,6 +24,13 @@ It provides two core functionalities:
 - **Service:**
   - `/save_waypoints` (`std_srvs/srv/Trigger`): Saves the latest received waypoints to the specified YAML file.
 
+- **Runtime note:**
+  - The `output_file` parameter is read right before saving. You can change it at runtime:
+    ```sh
+    ros2 param set /save_waypoints_server output_file /home/user/my_waypoints.yaml
+    ros2 service call /save_waypoints std_srvs/srv/Trigger {}
+    ```
+
 ---
 
 ### 2. `waypoint_looper`
@@ -50,11 +57,21 @@ It provides two core functionalities:
 - **Topics:**
   - `/waypoint_loop/distance_from_start` (`std_msgs/msg/Float64`): Publishes total distance traveled from start (latched- transient local QoS)
   - `/waypoint_loop/distance_from_last` (`std_msgs/msg/Float64`): Publishes distance traveled since last waypoint (latched- transient local QoS)
+  - `/waypoint_loop/eta_seconds` (`std_msgs/msg/Float64`): Publishes estimated time remaining to reach current goal in seconds (latched- transient local QoS)
+  - `/waypoint_loop/navigation_time_seconds` (`std_msgs/msg/Float64`): Publishes elapsed navigation time for current goal in seconds (latched- transient local QoS)
+  - `/waypoint_loop/distance_remaining` (`std_msgs/msg/Float64`): Publishes remaining distance to current goal in meters (latched- transient local QoS)
 
 - **Behavior Notes:**
   - Lowering `repeat_count` below the current loop index will cause the run to finish right after the current goal completes.
   - Changing `wait_at_waypoint_ms` does not affect an already running timer; it takes effect from the next waypoint.
   - If only one waypoint is loaded, single-goal mode is activated automatically.
+
+- **Runtime note:**
+  - The `yaml_file` parameter is read when you press Start. To switch waypoint files at runtime, set the param and call Start again:
+    ```sh
+    ros2 param set /waypoint_looper yaml_file /home/user/waypoints_alt.yaml
+    ros2 service call /start_waypoint_loop std_srvs/srv/Trigger {}
+    ```
 
 
 ## Launch

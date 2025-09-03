@@ -92,7 +92,7 @@ def generate_launch_description():
     )
 
     declare_repeat_count = DeclareLaunchArgument(
-        'repeat_count', default_value='100',
+        'repeat_count', default_value='10',
         description='Number of times to repeat the loop'
     )
 
