@@ -1,11 +1,10 @@
-
 # neo_waypoint_follower
 
 ![neo_waypoint_follower](https://github.com/user-attachments/assets/02c27bda-f1bc-4ca3-ad10-00a70c7917a8)
 
 ## Overview
 
-`neo_waypoint_follower` is a ROS 2 Humble package developed by Neobotix GmbH for waypoint following for Neobotix ROX robots.
+`neo_waypoint_follower` is a ROS 2 package developed by Neobotix GmbH for waypoint following for Neobotix ROX robots.
 
 It provides two core functionalities:
 
@@ -25,22 +24,54 @@ It provides two core functionalities:
 - **Service:**
   - `/save_waypoints` (`std_srvs/srv/Trigger`): Saves the latest received waypoints to the specified YAML file.
 
+- **Runtime note:**
+  - The `output_file` parameter is read right before saving. You can change it at runtime:
+    ```sh
+    ros2 param set /save_waypoints_server output_file /home/user/my_waypoints.yaml
+    ros2 service call /save_waypoints std_srvs/srv/Trigger {}
+    ```
+
 ---
 
 ### 2. `waypoint_looper`
 
 - **Purpose:** Loads waypoints from a YAML file and sends navigation goals to the Nav2 stack, looping through the waypoints as configured.
+- **Modes:**
+  - **Waypoint Loop Mode:** Loops through all waypoints for the specified number of repeats (`repeat_count`).
+  - **Single Goal Mode:** If only one waypoint is loaded, the node switches to single-goal navigation and executes just that goal once.
 - **Parameters:**
   - `yaml_file` (string): Path to the waypoints YAML file
   - `frame_id` (string): Frame ID for waypoints (default: `map`)
   - `repeat_count` (int): Number of times to repeat the waypoint loop (default: `100`)
-  - `wait_at_waypoint_ms` (int): Time to wait at each waypoint in milliseconds (default: `500`)
+  - `wait_at_waypoint_ms` (int): Time to wait at each waypoint in milliseconds (default: `200`)
   - `stop_on_failure` (bool): Stop looping on navigation failure (default: `true`)
   - `action_name` (string): Nav2 action server name (default: `/navigate_to_pose`)
+  - `odom_topic` (string): Odometry topic for distance tracking (default: `/odom`)
 
 - **Services:**
-  - `/start_waypoint_loop` (`std_srvs/srv/Trigger`): Starts the waypoint loop
-  - `/stop_waypoint_loop` (`std_srvs/srv/Trigger`): Stops the waypoint loop
+  - `/start_waypoint_loop` (`std_srvs/srv/Trigger`): Starts the waypoint loop or single-goal mode
+  - `/pause_waypoint_loop` (`std_srvs/srv/Trigger`): Pauses the waypoint loop
+  - `/resume_waypoint_loop` (`std_srvs/srv/Trigger`): Resumes the waypoint loop
+  - `/cancel_waypoint_loop` (`std_srvs/srv/Trigger`): Cancels and resets the waypoint loop
+
+- **Topics:**
+  - `/waypoint_loop/distance_from_start` (`std_msgs/msg/Float64`): Publishes total distance traveled from start (latched- transient local QoS)
+  - `/waypoint_loop/distance_from_last` (`std_msgs/msg/Float64`): Publishes distance traveled since last waypoint (latched- transient local QoS)
+  - `/waypoint_loop/eta_seconds` (`std_msgs/msg/Float64`): Publishes estimated time remaining to reach current goal in seconds (latched- transient local QoS)
+  - `/waypoint_loop/navigation_time_seconds` (`std_msgs/msg/Float64`): Publishes elapsed navigation time for current goal in seconds (latched- transient local QoS)
+  - `/waypoint_loop/distance_remaining` (`std_msgs/msg/Float64`): Publishes remaining distance to current goal in meters (latched- transient local QoS)
+
+- **Behavior Notes:**
+  - Lowering `repeat_count` below the current loop index will cause the run to finish right after the current goal completes.
+  - Changing `wait_at_waypoint_ms` does not affect an already running timer; it takes effect from the next waypoint.
+  - If only one waypoint is loaded, single-goal mode is activated automatically.
+
+- **Runtime note:**
+  - The `yaml_file` parameter is read when you press Start. To switch waypoint files at runtime, set the param and call Start again:
+    ```sh
+    ros2 param set /waypoint_looper yaml_file /home/user/waypoints_alt.yaml
+    ros2 service call /start_waypoint_loop std_srvs/srv/Trigger {}
+    ```
 
 
 ## Launch
@@ -59,7 +90,7 @@ ros2 launch neo_waypoint_follower waypoint_follower_launch.py
 | waypoints_yaml      | `<pkg>/config/waypoints.yaml`       | Path to the waypoints YAML file (save & loop)       |
 | frame_id            | `map`                       | Frame ID for waypoints                              |
 | repeat_count        | `100`                       | Number of times to repeat the loop                  |
-| wait_at_waypoint_ms | `500`                       | Time to wait at each waypoint (ms)                  |
+| wait_at_waypoint_ms | `200`                       | Time to wait at each waypoint (ms)                  |
 | stop_on_failure     | `true`                      | Stop looping on navigation failure                  |            |
 
 Example:
@@ -117,10 +148,29 @@ Make sure your custom YAML file follows the template provided in `config/waypoin
    ```sh
    ros2 service call /start_waypoint_loop std_srvs/srv/Trigger {}
    ```
-4. **Stop waypoint looping**:
-   ```sh
-   ros2 service call /stop_waypoint_loop std_srvs/srv/Trigger {}
-   ```
+   More Controls:
+
+  - **Pause then resume:**
+    ```sh
+    ros2 service call /pause_waypoint_loop std_srvs/srv/Trigger {}
+    ros2 service call /resume_waypoint_loop std_srvs/srv/Trigger {}
+    ```
+
+  - **Cancel & reset (no auto-restart):**
+    ```sh
+    ros2 service call /cancel_waypoint_loop std_srvs/srv/Trigger {}
+    ```
+4. **Dynamic Parameter Update**
+
+You can now change parameters at runtime using:
+
+  ```sh
+  ros2 param set /waypoint_looper repeat_count 2
+  ros2 param set /waypoint_looper wait_at_waypoint_ms 0
+  ```
+
+  This allows you to adjust the loop count and wait time while the node is running. See "Behavior Notes" above for details on how these changes affect execution.
+
 
 ## Further Information
 
