@@ -1,4 +1,4 @@
-# neo_waypoint_follower/LooperMetrics.msg
+# neo_waypoint_follower/msg/LooperMetrics.msg
 std_msgs/Header header
 
 # Progress

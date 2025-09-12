@@ -34,6 +34,7 @@
 #include <builtin_interfaces/msg/duration.hpp>
 #include <yaml-cpp/yaml.h>
 #include <neo_waypoint_follower/msg/looper_metrics.hpp>
+#include <neo_waypoint_follower/msg/waypoints.hpp>
 using LooperMetrics = neo_waypoint_follower::msg::LooperMetrics;
 
 class WaypointLooper : public rclcpp::Node {
@@ -112,6 +113,17 @@ public:
     metrics_timer_ = this->create_wall_timer(
       std::chrono::milliseconds(100),
       [this]() { publishMetrics_(); });
+
+    // Publish the currently loaded waypoints
+    loaded_waypoints_pub_ = create_publisher<neo_waypoint_follower::msg::Waypoints>(
+      "/waypoint_loop/loaded_waypoints",
+      rclcpp::QoS(1).transient_local());
+
+    // Service to publish the loaded waypoints once
+    publish_loaded_waypoints_srv_ = create_service<std_srvs::srv::Trigger>(
+      "publish_loaded_waypoints",
+      std::bind(&WaypointLooper::publishLoadedWaypointsCallback, this,
+                std::placeholders::_1, std::placeholders::_2));
 
     // Parameter change callback. can be updated anytime
     param_callback_handle_ = this->add_on_set_parameters_callback(
@@ -321,6 +333,55 @@ private:
       RCLCPP_ERROR(get_logger(), "YAML error: %s", e.what());
       return false;
     }
+  }
+
+  neo_waypoint_follower::msg::Waypoints buildLoadedWaypointsMsg_()
+  {
+    neo_waypoint_follower::msg::Waypoints msg;
+    msg.header.stamp = now();
+    msg.header.frame_id = frame_id_;
+
+    // pre-allocate room for exactly the waypoints we have for efficiency
+    msg.names.reserve(waypoints_.size());
+    msg.poses.reserve(waypoints_.size());
+
+    for (const auto & pair : waypoints_) {
+      msg.names.push_back(pair.first);
+
+      auto ps = pair.second;
+      if (ps.header.frame_id.empty()) {
+        ps.header.frame_id = frame_id_;
+      }
+      if (ps.header.stamp.sec == 0 && ps.header.stamp.nanosec == 0) {
+        ps.header.stamp = now();
+      }
+      msg.poses.push_back(ps);
+    }
+    return msg;
+  }
+
+  void publishLoadedWaypointsCallback(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> /*req*/,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> res)
+  {
+    if (!loaded_waypoints_pub_) {
+      res->success = false;
+      res->message = "Publisher not available";
+      return;
+    }
+
+    // Reload from YAML so updates on disk are reflected here
+    (void)loadYaml();
+
+    if (waypoints_.empty()) {
+      res->success = false;
+      res->message = "No waypoints loaded (YAML empty or load failed)";
+      return;
+    }
+
+    loaded_waypoints_pub_->publish(buildLoadedWaypointsMsg_());
+    res->success = true;
+    res->message = "Published loaded waypoints";
   }
 
   /**
@@ -533,6 +594,7 @@ private:
 
   rclcpp::Publisher<LooperMetrics>::SharedPtr metrics_pub_;
   rclcpp::TimerBase::SharedPtr metrics_timer_;
+  rclcpp::Publisher<neo_waypoint_follower::msg::Waypoints>::SharedPtr loaded_waypoints_pub_;
 
   uint8_t looper_state_ = LooperMetrics::LOOPER_IDLE;
   builtin_interfaces::msg::Duration eta_msg_{};
@@ -542,7 +604,7 @@ private:
 
   rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr nav_to_pose_client_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr
-  start_srv_, cancel_srv_, pause_srv_, resume_srv_;
+  start_srv_, cancel_srv_, pause_srv_, resume_srv_, publish_loaded_waypoints_srv_;
   rclcpp::TimerBase::SharedPtr delay_timer_;
   rclcpp_action::ClientGoalHandle<nav2_msgs::action::NavigateToPose>::SharedPtr current_goal_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;

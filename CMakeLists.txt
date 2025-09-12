@@ -28,7 +28,8 @@ find_package(rcl_interfaces REQUIRED)
 # Interface generation
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/LooperMetrics.msg"
-  DEPENDENCIES std_msgs builtin_interfaces
+  "msg/Waypoints.msg"
+  DEPENDENCIES std_msgs geometry_msgs builtin_interfaces
 )
 
 # Ensure generated headers are available to targets

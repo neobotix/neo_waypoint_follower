@@ -53,9 +53,11 @@ It provides two core functionalities:
   - `/pause_waypoint_loop` (`std_srvs/srv/Trigger`): Pauses the waypoint loop
   - `/resume_waypoint_loop` (`std_srvs/srv/Trigger`): Resumes the waypoint loop
   - `/cancel_waypoint_loop` (`std_srvs/srv/Trigger`): Cancels and resets the waypoint loop
+  - `/publish_loaded_waypoints` (`std_srvs/srv/Trigger`): Publishes the currently loaded waypoints once to a latched topic
 
 - **Topics:**
   - `/waypoint_loop/metrics` (`neo_waypoint_follower/msg/LooperMetrics`): Aggregated looper metrics (QoS: best_effort, durability_volatile)
+  - `/waypoint_loop/loaded_waypoints` (`neo_waypoint_follower/msg/Waypoints`): Names + poses for the currently loaded waypoints (QoS: reliable, transient_local)
 
 - **Message: `neo_waypoint_follower/LooperMetrics`**
   - `std_msgs/Header header`
@@ -78,6 +80,11 @@ It provides two core functionalities:
       - `LOOPER_PAUSED = 3`
       - `LOOPER_FINISHED = 4`
       - `LOOPER_ERROR = 5`
+
+- **Message: `neo_waypoint_follower/Waypoints`**
+  - `std_msgs/Header header`
+  - `string[] names`
+  - `geometry_msgs/PoseStamped[] poses`
 
 - **Behavior Notes:**
   - Lowering `repeat_count` below the current loop index will cause the run to finish right after the current goal completes.
@@ -178,6 +185,14 @@ Make sure your custom YAML file follows the template provided in `config/waypoin
     ```sh
     ros2 service call /cancel_waypoint_loop std_srvs/srv/Trigger {}
     ```
+5. **Publish loaded waypoints to a latched topic**
+
+   Trigger the node to publish the currently loaded waypoints once, then echo them:
+
+   ```sh
+   ros2 service call /publish_loaded_waypoints std_srvs/srv/Trigger {}
+   ros2 topic echo /waypoint_loop/loaded_waypoints
+   ```
 4. **Dynamic Parameter Update**
 
 You can now change parameters at runtime using:
@@ -193,4 +208,3 @@ You can now change parameters at runtime using:
 ## Further Information
 
 For more details and usage examples, please visit our official documentation at: [https://neobotix-docs.de/](https://neobotix-docs.de/)
-
