@@ -28,12 +28,13 @@
 #include <nav2_msgs/action/navigate_to_pose.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
-#include <std_msgs/msg/float64.hpp>
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <rcl_interfaces/msg/parameter_descriptor.hpp>
 #include <rcl_interfaces/msg/integer_range.hpp>
 #include <builtin_interfaces/msg/duration.hpp>
 #include <yaml-cpp/yaml.h>
+#include <neo_waypoint_follower/msg/looper_metrics.hpp>
+using LooperMetrics = neo_waypoint_follower::msg::LooperMetrics;
 
 class WaypointLooper : public rclcpp::Node {
 public:
@@ -105,12 +106,12 @@ public:
         publishMetrics_();
       });
 
-    auto qos_settings = rclcpp::QoS(1).reliable().transient_local();
-    pub_from_start_ = create_publisher<std_msgs::msg::Float64>("/waypoint_loop/distance_from_start", qos_settings);
-    pub_from_last_  = create_publisher<std_msgs::msg::Float64>("/waypoint_loop/distance_from_last", qos_settings);
-    pub_eta_sec_ = create_publisher<std_msgs::msg::Float64>("/waypoint_loop/eta_seconds", qos_settings);
-    pub_nav_time_sec_ = create_publisher<std_msgs::msg::Float64>("/waypoint_loop/navigation_time_seconds", qos_settings);
-    pub_distance_remaining_ = create_publisher<std_msgs::msg::Float64>("/waypoint_loop/distance_remaining", qos_settings);
+    auto metrics_qos = rclcpp::QoS(10).best_effort().durability_volatile();
+    metrics_pub_ = create_publisher<LooperMetrics>("/waypoint_loop/metrics", metrics_qos);
+
+    metrics_timer_ = this->create_wall_timer(
+      std::chrono::milliseconds(100),
+      [this]() { publishMetrics_(); });
 
     // Parameter change callback. can be updated anytime
     param_callback_handle_ = this->add_on_set_parameters_callback(
@@ -159,12 +160,15 @@ public:
 
 private:
   // services
-  /// \brief Service callback to start waypoint loop execution.
-  ///
-  /// Resets indices, loads waypoints, and begins looping from the first waypoint.
-  ///
-  /// \param req Service request (unused)
-  /// \param res Service response
+  /**
+   * @brief Service callback to start waypoint loop execution.
+   *
+   * Resets indices, loads waypoints, and begins looping from the first waypoint.
+   * Handles single-goal mode detection and action server readiness.
+   *
+   * @param req Service request (unused)
+   * @param res Service response
+   */
   void startCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                std::shared_ptr<std_srvs::srv::Trigger::Response> res)
   {
@@ -175,13 +179,14 @@ private:
       starting_ = false; res->success = false; res->message = "NavigateToPose server not up"; return;
     }
 
-    // Detect single-goal mode
+    // Detect single-goal mode (only one waypoint in YAML)
     single_goal_mode_ = (waypoints_.size() == 1);
 
     // clear flags/indices
     paused_ = false;
     if (delay_timer_) delay_timer_->cancel();
 
+    // Reset odometry and progress tracking
     run_distance_ = 0.0;
     leg_distance_ = 0.0;
 
@@ -189,9 +194,13 @@ private:
     running_        = true;
     goal_in_flight_ = false;
 
+    // Reset indices for loop and waypoint
     loop_idx_       = 0;
     wp_idx_         = 0;
 
+    looper_state_ = LooperMetrics::LOOPER_RUNNING;
+    resetNav2Feedback_();
+    publishMetrics_();
     sendNext();
     starting_ = false;
     res->success = true;
@@ -200,12 +209,14 @@ private:
                 single_goal_mode_ ? "Single-goal navigation" : "Waypoint loop");
   }
 
-  /// \brief Service callback to pause waypoint loop execution.
-  ///
-  /// Cancels any active goal and preserves progress for resuming.
-  ///
-  /// \param req Service request (unused)
-  /// \param res Service response
+  /**
+   * @brief Service callback to pause waypoint loop execution.
+   *
+   * Cancels any active goal and preserves progress for resuming.
+   *
+   * @param req Service request (unused)
+   * @param res Service response
+   */
   void pauseCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                    std::shared_ptr<std_srvs::srv::Trigger::Response> res)
   {
@@ -213,21 +224,22 @@ private:
     if (paused_)   { res->success=false; res->message="Already paused"; return; }
 
     paused_ = true;
+    // Cancel timer and active goal if present
     if (delay_timer_) delay_timer_->cancel();
-    if (current_goal_) {
-      auto future = nav_to_pose_client_->async_cancel_goal(current_goal_); (void)future;
-    }
-    res->success = true;
-    res->message = "Paused";
+    if (current_goal_) { auto future = nav_to_pose_client_->async_cancel_goal(current_goal_); (void)future; }
+    looper_state_ = LooperMetrics::LOOPER_PAUSED;
+    res->success = true; res->message = "Paused";
     publishMetrics_();
   }
 
-  /// \brief Service callback to resume waypoint loop execution.
-  ///
-  /// Continues execution from the paused waypoint and loop index.
-  ///
-  /// \param req Service request (unused)
-  /// \param res Service response
+  /**
+   * @brief Service callback to resume waypoint loop execution.
+   *
+   * Continues execution from the paused waypoint and loop index.
+   *
+   * @param req Service request (unused)
+   * @param res Service response
+   */
   void resumeCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                       std::shared_ptr<std_srvs::srv::Trigger::Response> res)
   {
@@ -235,51 +247,45 @@ private:
     if (!paused_)  { res->success=false; res->message="Not paused"; return; }
 
     paused_ = false;
-    // Re-send the current waypoint if nothing is in flight
+    looper_state_ = LooperMetrics::LOOPER_RUNNING;
+    // Resume navigation if no goal is in flight
     if (!goal_in_flight_) sendNext();
-    res->success = true;
-    res->message = "Resumed";
+    res->success = true; res->message = "Resumed";
+    publishMetrics_();
   }
 
-  /// \brief Service callback to cancel waypoint loop execution.
-  ///
-  /// Aborts the loop, cancels any active goal, and resets all progress.
-  ///
-  /// \param req Service request (unused)
-  /// \param res Service response
+  /**
+   * @brief Service callback to cancel waypoint loop execution.
+   *
+   * Aborts the loop, cancels any active goal, and resets all progress.
+   *
+   * @param req Service request (unused)
+   * @param res Service response
+   */
   void cancelCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                       std::shared_ptr<std_srvs::srv::Trigger::Response> res)
   {
+    // Cancel timer and active goal, reset all indices and progress
     if (delay_timer_) delay_timer_->cancel();
-    paused_ = false;
-    running_ = false;
-    goal_in_flight_ = false;
-    starting_ = false;
-
-    if (current_goal_) {
-      auto future = nav_to_pose_client_->async_cancel_goal(current_goal_); (void)future;
-      current_goal_.reset();
-    }
-
-    loop_idx_ = 0;
-    wp_idx_ = 0;
-
-    run_distance_ = 0.0;
-    leg_distance_ = 0.0;
-    have_last_odom_ = false;
-
-    res->success = true;
-    res->message = "Canceled and reset.";
+    paused_ = false; running_ = false; goal_in_flight_ = false; starting_ = false;
+    if (current_goal_) { auto future = nav_to_pose_client_->async_cancel_goal(current_goal_); (void)future; current_goal_.reset(); }
+    loop_idx_ = 0; wp_idx_ = 0;
+    run_distance_ = 0.0; leg_distance_ = 0.0; have_last_odom_ = false;
+    looper_state_ = LooperMetrics::LOOPER_IDLE;
+    resetNav2Feedback_();
+    res->success = true; res->message = "Canceled and reset.";
     RCLCPP_INFO(get_logger(), "Waypoint loop canceled and reset.");
     publishMetrics_();
   }
 
-  // yaml
-  /// \brief Load waypoints from YAML file.
-  ///
-  /// Parses the configured YAML file and loads waypoints into memory.
-  ///
-  /// \return True if waypoints loaded successfully, false otherwise.
+  /**
+   * @brief Load waypoints from YAML file.
+   *
+   * Parses the configured YAML file and loads waypoints into memory.
+   * Each waypoint must have position and orientation fields.
+   *
+   * @return True if waypoints loaded successfully, false otherwise.
+   */
   bool loadYaml() {
     try {
 
@@ -317,14 +323,17 @@ private:
     }
   }
 
-  // action sequencing
-  /// \brief Send the next waypoint goal to the navigation action server.
-  ///
-  /// Handles sequencing, looping, and delay between waypoints.
+  /**
+   * @brief Send the next waypoint goal to the navigation action server.
+   *
+   * Handles sequencing, looping, and delay between waypoints.
+   * Manages single-goal mode, feedback, and result handling.
+   */
   void sendNext()
   {
     if (!running_ || goal_in_flight_ || paused_) return;
 
+    // If all loops are complete, finish the run
     if (loop_idx_ >= effective_repeat_count()) { finish(); return; }
 
     if (wp_idx_ >= waypoints_.size()) {
@@ -334,6 +343,7 @@ private:
     }
 
     const auto & pair = waypoints_[wp_idx_];
+    current_waypoint_name_ = pair.first;
     auto goal = nav2_msgs::action::NavigateToPose::Goal();
     goal.pose = pair.second;
     goal.pose.header.stamp = now();
@@ -346,35 +356,25 @@ private:
                   wp_idx_ + 1, waypoints_.size());
     }
 
-    leg_distance_ = 0.0;
-    have_last_odom_ = false;
+    leg_distance_ = 0.0; have_last_odom_ = false;
+    resetNav2Feedback_();
+    looper_state_ = LooperMetrics::LOOPER_RUNNING;
     publishMetrics_();
 
     goal_in_flight_ = true;
 
     auto options = rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SendGoalOptions();
-    
-    options.feedback_callback = 
+
+    options.feedback_callback =
       [this](rclcpp_action::ClientGoalHandle<nav2_msgs::action::NavigateToPose>::SharedPtr,
-              const std::shared_ptr<const nav2_msgs::action::NavigateToPose::Feedback> feedback)
+             const std::shared_ptr<const nav2_msgs::action::NavigateToPose::Feedback> fb)
       {
-        std_msgs::msg::Float64 msg;
-        
-        // Convert duration to seconds
-        auto eta_duration = feedback->estimated_time_remaining;
-        double eta_seconds = eta_duration.sec + eta_duration.nanosec / 1e9;
-        msg.data = eta_seconds;
-        pub_eta_sec_->publish(msg);
-        
-        auto nav_duration = feedback->navigation_time;
-        double nav_seconds = nav_duration.sec + nav_duration.nanosec / 1e9;
-        msg.data = nav_seconds;
-        pub_nav_time_sec_->publish(msg);
-        
-        msg.data = feedback->distance_remaining;
-        pub_distance_remaining_->publish(msg);
+        eta_msg_       = fb->estimated_time_remaining;
+        nav_time_msg_  = fb->navigation_time;
+        distance_remaining_ = fb->distance_remaining;
+        publishMetrics_();
       };
-    
+
     options.goal_response_callback =
       [this](std::shared_ptr<rclcpp_action::ClientGoalHandle<nav2_msgs::action::NavigateToPose>> gh){
         if (!gh) {
@@ -391,42 +391,44 @@ private:
       {
         goal_in_flight_ = false;
         current_goal_.reset();
-        publishMetrics_();
-        
-        // Do not zero on user pause (cancel due to pause)
+
         if (!(paused_ && result.code == rclcpp_action::ResultCode::CANCELED)) {
-          resetNav2Feedback_();
+          // keep last nav_time; zero others if desired in reset helper
         }
+        publishMetrics_();
 
-      switch (result.code) {
-        case rclcpp_action::ResultCode::SUCCEEDED:
-          RCLCPP_INFO(this->get_logger(), "Reached");
-          ++wp_idx_;  // advance on success
-          break;
-
-        case rclcpp_action::ResultCode::CANCELED:
-          if (paused_) {
-            // user paused, so stay at same wp_idx_
-            return;
-          } else {
+        switch (result.code) {
+          case rclcpp_action::ResultCode::SUCCEEDED:
+            RCLCPP_INFO(this->get_logger(), "Reached");
+            ++wp_idx_;
+            break;
+          case rclcpp_action::ResultCode::CANCELED:
+            if (paused_) return;
             RCLCPP_WARN(this->get_logger(), "Goal canceled");
             if (stop_on_fail_) { running_ = false; finish(); return; }
-            else { ++wp_idx_; }  // advance if not stopping on fail
-          }
-          break;
-
-        default:
-          RCLCPP_WARN(this->get_logger(), "Result code %d", (int)result.code);
-          if (stop_on_fail_) { running_ = false; finish(); return; }
-          else { ++wp_idx_; }
-          break;
-      }
+            else { ++wp_idx_; }
+            break;
+          default:
+            RCLCPP_WARN(this->get_logger(), "Result code %d", (int)result.code);
+            if (stop_on_fail_) { running_ = false; finish(); return; }
+            else { ++wp_idx_; }
+            break;
+        }
 
         if (!running_) return;
 
-        const int wait_ms = effective_delay_ms();  // 0 in single_goal_mode_, wait_ms_descriptor_ otherwise
+        const int wait_ms = effective_delay_ms();
+
+        const bool last_goal_overall =
+          (wp_idx_ >= waypoints_.size()) &&
+          ((loop_idx_ + 1) >= effective_repeat_count());
+
+        if (last_goal_overall) { finish(); return; }
+
         if (wait_ms > 0) {
           if (delay_timer_) delay_timer_->cancel();
+          looper_state_ = LooperMetrics::LOOPER_WAITING;
+          publishMetrics_();
           delay_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(wait_ms),
             [this]() {
@@ -435,7 +437,6 @@ private:
               sendNext();
             });
         } else {
-          // single goal or zero wait: continue immediately
           sendNext();
         }
       };
@@ -443,11 +444,20 @@ private:
     nav_to_pose_client_->async_send_goal(goal, options);
   }
 
-  /// \brief Called when all loops are completed or execution is stopped.
+  /**
+   * @brief Complete the waypoint loop run and publish final metrics.
+   *
+   * Sets state to finished and logs completion.
+   */
   void finish()
   {
     running_ = false;
     goal_in_flight_ = false;
+    looper_state_ = LooperMetrics::LOOPER_FINISHED;
+    distance_remaining_ = 0.0;
+    eta_msg_.sec = 0; eta_msg_.nanosec = 0;
+    publishMetrics_();
+
     if (single_goal_mode_) {
       RCLCPP_INFO(get_logger(), "Single goal complete.");
     } else {
@@ -455,40 +465,41 @@ private:
     }
   }
 
-  /// \brief Publish distance metrics to the metrics topic.
+  /**
+   * @brief Publish current looper metrics to topic.
+   *
+   * Includes loop/waypoint indices, distances, ETA, and state.
+   */
   void publishMetrics_()
   {
-    std_msgs::msg::Float64 m;
-    m.data = run_distance_; pub_from_start_->publish(m);
-    m.data = leg_distance_; pub_from_last_->publish(m);
+    if (!metrics_pub_) { return; }
+    LooperMetrics m;
+    m.header.stamp = now();
+    m.header.frame_id = frame_id_;
+
+    m.loop_idx = static_cast<uint32_t>(loop_idx_);
+    m.wp_idx   = static_cast<uint32_t>(wp_idx_);
+    m.current_waypoint_name = current_waypoint_name_;
+
+    m.distance_from_start = run_distance_;
+    m.distance_from_last  = leg_distance_;
+    m.distance_remaining  = distance_remaining_;
+
+    m.eta            = eta_msg_;
+    m.navigation_time = nav_time_msg_;
+
+    m.looper_state = looper_state_;
+    metrics_pub_->publish(m);
   }
 
-  /// \brief Publish Nav2 feedback metrics for GUI consumption.
-  void publishNav2Feedback_()
-  {
-    // Will be populated with actual feedback data when feedback is received
-    std_msgs::msg::Float64 msg;
-    
-    // Publish placeholder values. These will be updated in feedback callback
-    msg.data = 0.0;  // eta_seconds default
-    pub_eta_sec_->publish(msg);
-    
-    msg.data = 0.0;  // navigation_time_seconds default  
-    pub_nav_time_sec_->publish(msg);
-    
-    msg.data = 0.0;  // distance_remaining default
-    pub_distance_remaining_->publish(msg);
-  }
-
-  /// \brief Reset Nav2 feedback metrics to zero.
+  /**
+   * @brief Reset navigation feedback fields (distance, ETA, time).
+   */
   void resetNav2Feedback_()
   {
-    std_msgs::msg::Float64 msg;
-    msg.data = 0.0;
-    
-    pub_eta_sec_->publish(msg);
-    pub_nav_time_sec_->publish(msg);
-    pub_distance_remaining_->publish(msg);
+    distance_remaining_ = 0.0;
+    eta_msg_.sec = 0;     eta_msg_.nanosec = 0;
+    nav_time_msg_.sec = 0; nav_time_msg_.nanosec = 0;
   }
 
   // limits
@@ -512,20 +523,23 @@ private:
 
   std::vector<std::pair<std::string, geometry_msgs::msg::PoseStamped>> waypoints_;
 
-  // distance state
   bool have_last_odom_ = false;
   geometry_msgs::msg::Point last_odom_p_{};
-  double run_distance_ = 0.0;     // "distance from start" (per run or per loop)
-  double leg_distance_ = 0.0;     // "distance from last" (per waypoint leg)
+  double run_distance_ = 0.0;
+  double leg_distance_ = 0.0;
 
-  // ROS interfaces
   std::string odom_topic_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
-  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr pub_from_start_;
-  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr pub_from_last_;
-  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr pub_eta_sec_;
-  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr pub_nav_time_sec_;
-  rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr pub_distance_remaining_;
+
+  rclcpp::Publisher<LooperMetrics>::SharedPtr metrics_pub_;
+  rclcpp::TimerBase::SharedPtr metrics_timer_;
+
+  uint8_t looper_state_ = LooperMetrics::LOOPER_IDLE;
+  builtin_interfaces::msg::Duration eta_msg_{};
+  builtin_interfaces::msg::Duration nav_time_msg_{};
+  double distance_remaining_ = 0.0;
+  std::string current_waypoint_name_;
+
   rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr nav_to_pose_client_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr
   start_srv_, cancel_srv_, pause_srv_, resume_srv_;
@@ -534,7 +548,10 @@ private:
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 };
 
-/// \brief Main entry point for the WaypointLooper node.
+/**
+ * @brief Main entry point for the WaypointLooper node.
+ * Initializes ROS2, spins the node, and shuts down cleanly.
+ */
 int main(int argc, char **argv)
 {
   rclcpp::init(argc, argv);

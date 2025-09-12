@@ -19,6 +19,20 @@ find_package(std_srvs REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(builtin_interfaces REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(rcl_interfaces REQUIRED)
+
+# Interface generation
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/LooperMetrics.msg"
+  DEPENDENCIES std_msgs builtin_interfaces
+)
+
+# Ensure generated headers are available to targets
+ament_export_dependencies(rosidl_default_runtime)
 
 # Save Waypoints Server Executable
 add_executable(save_waypoints_server src/save_waypoints_server.cpp)
@@ -33,13 +47,16 @@ install(TARGETS save_waypoints_server
 add_executable(waypoint_looper src/waypoint_looper.cpp)
 ament_target_dependencies(waypoint_looper
   rclcpp rclcpp_action nav2_msgs geometry_msgs std_srvs)
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(waypoint_looper ${cpp_typesupport_target})
+
 target_link_libraries(waypoint_looper yaml-cpp)
 
 install(TARGETS waypoint_looper
   DESTINATION lib/${PROJECT_NAME})
 
 # Install launch files and configs
-install(DIRECTORY launch config
+install(DIRECTORY launch config msg
   DESTINATION share/${PROJECT_NAME})
 
 ament_package()
