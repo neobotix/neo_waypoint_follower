@@ -55,11 +55,29 @@ It provides two core functionalities:
   - `/cancel_waypoint_loop` (`std_srvs/srv/Trigger`): Cancels and resets the waypoint loop
 
 - **Topics:**
-  - `/waypoint_loop/distance_from_start` (`std_msgs/msg/Float64`): Publishes total distance traveled from start (latched- transient local QoS)
-  - `/waypoint_loop/distance_from_last` (`std_msgs/msg/Float64`): Publishes distance traveled since last waypoint (latched- transient local QoS)
-  - `/waypoint_loop/eta_seconds` (`std_msgs/msg/Float64`): Publishes estimated time remaining to reach current goal in seconds (latched- transient local QoS)
-  - `/waypoint_loop/navigation_time_seconds` (`std_msgs/msg/Float64`): Publishes elapsed navigation time for current goal in seconds (latched- transient local QoS)
-  - `/waypoint_loop/distance_remaining` (`std_msgs/msg/Float64`): Publishes remaining distance to current goal in meters (latched- transient local QoS)
+  - `/waypoint_loop/metrics` (`neo_waypoint_follower/msg/LooperMetrics`): Aggregated looper metrics (QoS: best_effort, durability_volatile)
+
+- **Message: `neo_waypoint_follower/LooperMetrics`**
+  - `std_msgs/Header header`
+  - Progress:
+    - `uint32 loop_idx` (0-based current loop index)
+    - `uint32 wp_idx` (0-based current waypoint index)
+    - `string current_waypoint_name`
+  - Distances (meters):
+    - `float64 distance_from_start`
+    - `float64 distance_from_last`
+    - `float64 distance_remaining`
+  - Timing:
+    - `builtin_interfaces/Duration eta`
+    - `builtin_interfaces/Duration navigation_time`
+  - State:
+    - `uint8 looper_state` — enum values:
+      - `LOOPER_IDLE = 0`
+      - `LOOPER_RUNNING = 1`
+      - `LOOPER_WAITING = 2`
+      - `LOOPER_PAUSED = 3`
+      - `LOOPER_FINISHED = 4`
+      - `LOOPER_ERROR = 5`
 
 - **Behavior Notes:**
   - Lowering `repeat_count` below the current loop index will cause the run to finish right after the current goal completes.
