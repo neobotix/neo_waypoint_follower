@@ -1,0 +1,8 @@
+# Request
+---
+bool success
+string message
+string[] filenames
+int32[] points
+bool[] has_loop
+

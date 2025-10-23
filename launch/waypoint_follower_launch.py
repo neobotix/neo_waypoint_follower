@@ -52,9 +52,22 @@ def execution_stage(context,
         }]
     )
 
+    vault_manager_node = Node(
+        package='neo_waypoint_follower',
+        executable='vault_manager',
+        name='vault_manager',
+        output='screen',
+        parameters=[{
+            'vault_dir': '/var/lib/neo/waypoints',
+            'save_server_node': '/save_waypoints_server',
+            'looper_node': '/waypoint_looper'
+        }]
+    )
+
     return [
         save_waypoints_server_node,
-        waypoint_looper_node
+        waypoint_looper_node,
+        vault_manager_node
     ]
 
 

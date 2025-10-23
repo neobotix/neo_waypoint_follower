@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.5)
 project(neo_waypoint_follower)
 
 if(NOT CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 14)
+  set(CMAKE_CXX_STANDARD 17)
 endif()
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -14,6 +14,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
+find_package(rclcpp_components REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(nav2_msgs REQUIRED)
@@ -29,6 +30,10 @@ find_package(rcl_interfaces REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/LooperMetrics.msg"
   "msg/Waypoints.msg"
+  "srv/VaultList.srv"
+  "srv/VaultSaveCurrent.srv"
+  "srv/VaultLoadToLooper.srv"
+  "srv/VaultPreview.srv"
   DEPENDENCIES std_msgs geometry_msgs builtin_interfaces
 )
 
@@ -56,8 +61,18 @@ target_link_libraries(waypoint_looper yaml-cpp)
 install(TARGETS waypoint_looper
   DESTINATION lib/${PROJECT_NAME})
 
+# Vault Manager Executable
+add_executable(vault_manager src/vault_manager.cpp)
+ament_target_dependencies(vault_manager
+  rclcpp rclcpp_action rclcpp_components std_srvs geometry_msgs yaml-cpp)
+target_link_libraries(vault_manager ${cpp_typesupport_target})
+target_link_libraries(vault_manager yaml-cpp)
+
+install(TARGETS vault_manager
+  DESTINATION lib/${PROJECT_NAME})
+
 # Install launch files and configs
-install(DIRECTORY launch config msg
+install(DIRECTORY launch config msg srv
   DESTINATION share/${PROJECT_NAME})
 
 ament_package()

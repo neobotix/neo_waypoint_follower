@@ -208,3 +208,95 @@ You can now change parameters at runtime using:
 ## Further Information
 
 For more details and usage examples, please visit our official documentation at: [https://neobotix-docs.de/](https://neobotix-docs.de/)
+
+---
+
+## Vault Manager
+
+Minimal, production-ready waypoint vault utilities bundled with `neo_waypoint_follower`.
+
+### Purpose
+
+- Owns a simple on-disk vault directory for waypoint YAMLs.
+- Provides services to list, save (via existing saver), load into the looper (params only), and preview waypoints to a latched topic.
+
+### Defaults
+
+- Vault directory: `/var/lib/neo/waypoints`
+- Preview topic: `/vault/preview_waypoints` (QoS: reliable, transient_local)
+- Works alongside existing nodes: `save_waypoints_server` and `waypoint_looper`.
+
+### Node: `vault_manager`
+
+- Parameters:
+  - `vault_dir` (string, default: `/var/lib/neo/waypoints`): Base directory that stores waypoint YAML files.
+  - `save_server_node` (string, default: `/save_waypoints_server`): Target node name for setting `output_file` before saving.
+  - `looper_node` (string, default: `/waypoint_looper`): Target node name for setting `yaml_file` (and optional loop params).
+  - `frame_id` (string, default: `map`): Frame used when previewing waypoints.
+
+- Services:
+  - `/vault/list` (`neo_waypoint_follower/srv/VaultList`)
+    - Request: empty
+    - Response: `bool success`, `string message`, `string[] filenames`, `int32[] points`, `bool[] has_loop`
+  - `/vault/save_current` (`neo_waypoint_follower/srv/VaultSaveCurrent`)
+    - Request: `string filename`, `bool allow_overwrite`
+    - Response: `bool success`, `string message`
+    - Behavior: sets `/save_waypoints_server` parameter `output_file` to `<vault_dir>/<filename>.yaml` and calls `/save_waypoints` (Trigger)
+  - `/vault/load_to_looper` (`neo_waypoint_follower/srv/VaultLoadToLooper`)
+    - Request: `string filename`, `bool set_loop_params`, `int32 loop_count`, `int32 wait_ms`
+    - Response: `bool success`, `string message`
+    - Behavior: sets `/waypoint_looper` parameter `yaml_file` and (optionally) `repeat_count`, `wait_at_waypoint_ms`
+  - `/vault/preview_once` (`neo_waypoint_follower/srv/VaultPreview`)
+    - Request: `string filename`
+    - Response: `bool success`, `string message`
+    - Behavior: publishes a one-shot `neo_waypoint_follower/Waypoints` to `/vault/preview_waypoints` (latched)
+
+- Topics:
+  - `/vault/preview_waypoints` (`neo_waypoint_follower/msg/Waypoints`): One-shot preview published with QoS `transient_local` so late subscribers receive it.
+
+### YAML Structure
+
+Same as used by `save_waypoints_server` and `waypoint_looper`:
+
+```yaml
+waypoints:
+  point_1:
+    position: {x: 0.0, y: 0.0, z: 0.0}
+    orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+  point_2:
+    position: {x: 1.0, y: 2.0, z: 0.0}
+    orientation: {x: 0.0, y: 0.0, z: 0.7071, w: 0.7071}
+```
+
+### Usage Examples
+
+- List vault files:
+  ```sh
+  ros2 service call /vault/list neo_waypoint_follower/srv/VaultList {}
+  ```
+
+- Save current waypoints (via saver):
+  ```sh
+  ros2 service call /vault/save_current neo_waypoint_follower/srv/VaultSaveCurrent "{filename: patrol_a, allow_overwrite: true}"
+  ```
+
+- Load into looper (set params only):
+  ```sh
+  ros2 service call /vault/load_to_looper neo_waypoint_follower/srv/VaultLoadToLooper \
+    "{filename: patrol_a, set_loop_params: true, loop_count: 3, wait_ms: 500}"
+  ```
+
+- Preview once (latched):
+  ```sh
+  ros2 service call /vault/preview_once neo_waypoint_follower/srv/VaultPreview "{filename: patrol_a}"
+  ros2 topic echo /vault/preview_waypoints
+  ```
+
+### Launch Integration
+
+`vault_manager` is included in `waypoint_follower_launch.py` with sensible defaults. Override its parameters if needed:
+
+```sh
+ros2 launch neo_waypoint_follower waypoint_follower_launch.py \
+  vault_dir:=/var/lib/neo/waypoints
+```
