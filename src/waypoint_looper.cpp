@@ -21,6 +21,7 @@
 #include <cmath>
 #include <chrono>
 #include <atomic>
+#include <cstdint>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 
@@ -211,7 +212,9 @@ private:
     wp_idx_         = 0;
 
     looper_state_ = LooperMetrics::LOOPER_RUNNING;
+    status_message_ = single_goal_mode_ ? "Single-goal run started" : "Waypoint loop started";
     resetNav2Feedback_();
+    resetNav2Result_();
     publishMetrics_();
     sendNext();
     starting_ = false;
@@ -240,6 +243,7 @@ private:
     if (delay_timer_) delay_timer_->cancel();
     if (current_goal_) { auto future = nav_to_pose_client_->async_cancel_goal(current_goal_); (void)future; }
     looper_state_ = LooperMetrics::LOOPER_PAUSED;
+    status_message_ = "Paused by user";
     res->success = true; res->message = "Paused";
     publishMetrics_();
   }
@@ -260,6 +264,7 @@ private:
 
     paused_ = false;
     looper_state_ = LooperMetrics::LOOPER_RUNNING;
+    status_message_ = "Resumed";
     // Resume navigation if no goal is in flight
     if (!goal_in_flight_) sendNext();
     res->success = true; res->message = "Resumed";
@@ -284,7 +289,9 @@ private:
     loop_idx_ = 0; wp_idx_ = 0;
     run_distance_ = 0.0; leg_distance_ = 0.0; have_last_odom_ = false;
     looper_state_ = LooperMetrics::LOOPER_IDLE;
+    status_message_ = "Canceled and reset";
     resetNav2Feedback_();
+    resetNav2Result_();
     res->success = true; res->message = "Canceled and reset.";
     RCLCPP_INFO(get_logger(), "Waypoint loop canceled and reset.");
     publishMetrics_();
@@ -419,6 +426,7 @@ private:
 
     leg_distance_ = 0.0; have_last_odom_ = false;
     resetNav2Feedback_();
+    status_message_ = std::string("Navigating to ") + current_waypoint_name_;
     looper_state_ = LooperMetrics::LOOPER_RUNNING;
     publishMetrics_();
 
@@ -442,6 +450,12 @@ private:
           RCLCPP_ERROR(this->get_logger(), "Goal rejected");
           goal_in_flight_ = false;
           running_ = false;
+          looper_state_ = LooperMetrics::LOOPER_ERROR;
+          nav_result_code_ = static_cast<uint8_t>(rclcpp_action::ResultCode::UNKNOWN);
+          nav_error_code_ = nav2_msgs::action::NavigateToPose::Result::UNKNOWN;
+          nav_error_msg_ = "Goal rejected by action server";
+          status_message_ = "Goal rejected by action server";
+          publishMetrics_();
         } else {
           current_goal_ = gh;
         }
@@ -452,6 +466,14 @@ private:
       {
         goal_in_flight_ = false;
         current_goal_.reset();
+        nav_result_code_ = static_cast<uint8_t>(result.code);
+        if (result.result) {
+          nav_error_code_ = result.result->error_code;
+          nav_error_msg_ = result.result->error_msg;
+        } else {
+          nav_error_code_ = nav2_msgs::action::NavigateToPose::Result::UNKNOWN;
+          nav_error_msg_.clear();
+        }
 
         if (!(paused_ && result.code == rclcpp_action::ResultCode::CANCELED)) {
           // keep last nav_time; zero others if desired in reset helper
@@ -461,17 +483,44 @@ private:
         switch (result.code) {
           case rclcpp_action::ResultCode::SUCCEEDED:
             RCLCPP_INFO(this->get_logger(), "Reached");
+            status_message_ = std::string("Reached ") + current_waypoint_name_;
             ++wp_idx_;
             break;
           case rclcpp_action::ResultCode::CANCELED:
-            if (paused_) return;
+            if (paused_) {
+              status_message_ = "Paused by user";
+              return;
+            }
             RCLCPP_WARN(this->get_logger(), "Goal canceled");
-            if (stop_on_fail_) { running_ = false; finish(); return; }
+            status_message_ = nav_error_msg_.empty() ? "Goal canceled by Nav2" : nav_error_msg_;
+            if (stop_on_fail_) {
+              looper_state_ = LooperMetrics::LOOPER_ERROR;
+              running_ = false;
+              finish();
+              return;
+            }
+            else { ++wp_idx_; }
+            break;
+          case rclcpp_action::ResultCode::ABORTED:
+            RCLCPP_WARN(this->get_logger(), "Goal aborted");
+            status_message_ = nav_error_msg_.empty() ? "Goal aborted by Nav2" : nav_error_msg_;
+            if (stop_on_fail_) {
+              looper_state_ = LooperMetrics::LOOPER_ERROR;
+              running_ = false;
+              finish();
+              return;
+            }
             else { ++wp_idx_; }
             break;
           default:
             RCLCPP_WARN(this->get_logger(), "Result code %d", (int)result.code);
-            if (stop_on_fail_) { running_ = false; finish(); return; }
+            status_message_ = nav_error_msg_.empty() ? "Navigation failed" : nav_error_msg_;
+            if (stop_on_fail_) {
+              looper_state_ = LooperMetrics::LOOPER_ERROR;
+              running_ = false;
+              finish();
+              return;
+            }
             else { ++wp_idx_; }
             break;
         }
@@ -489,6 +538,7 @@ private:
         if (wait_ms > 0) {
           if (delay_timer_) delay_timer_->cancel();
           looper_state_ = LooperMetrics::LOOPER_WAITING;
+          status_message_ = std::string("Waiting at waypoint ") + current_waypoint_name_;
           publishMetrics_();
           delay_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(wait_ms),
@@ -514,12 +564,20 @@ private:
   {
     running_ = false;
     goal_in_flight_ = false;
-    looper_state_ = LooperMetrics::LOOPER_FINISHED;
+    const bool has_error = looper_state_ == LooperMetrics::LOOPER_ERROR;
+    if (!has_error) {
+      looper_state_ = LooperMetrics::LOOPER_FINISHED;
+      status_message_ = single_goal_mode_ ? "Single goal complete" : "Waypoint loop complete";
+    } else if (status_message_.empty()) {
+      status_message_ = "Waypoint loop failed";
+    }
     distance_remaining_ = 0.0;
     eta_msg_.sec = 0; eta_msg_.nanosec = 0;
     publishMetrics_();
 
-    if (single_goal_mode_) {
+    if (has_error) {
+      RCLCPP_WARN(get_logger(), "Run finished with error: %s", status_message_.c_str());
+    } else if (single_goal_mode_) {
       RCLCPP_INFO(get_logger(), "Single goal complete.");
     } else {
       RCLCPP_INFO(get_logger(), "Completed %zu loop(s).", repeat_count_);
@@ -550,6 +608,10 @@ private:
     m.navigation_time = nav_time_msg_;
 
     m.looper_state = looper_state_;
+    m.nav_result_code = nav_result_code_;
+    m.nav_error_code = nav_error_code_;
+    m.nav_error_msg = nav_error_msg_;
+    m.status_message = status_message_;
     metrics_pub_->publish(m);
   }
 
@@ -561,6 +623,16 @@ private:
     distance_remaining_ = 0.0;
     eta_msg_.sec = 0;     eta_msg_.nanosec = 0;
     nav_time_msg_.sec = 0; nav_time_msg_.nanosec = 0;
+  }
+
+  /**
+   * @brief Reset last action result fields carried in metrics.
+   */
+  void resetNav2Result_()
+  {
+    nav_result_code_ = static_cast<uint8_t>(rclcpp_action::ResultCode::UNKNOWN);
+    nav_error_code_ = nav2_msgs::action::NavigateToPose::Result::NONE;
+    nav_error_msg_.clear();
   }
 
   // limits
@@ -601,6 +673,10 @@ private:
   builtin_interfaces::msg::Duration nav_time_msg_{};
   double distance_remaining_ = 0.0;
   std::string current_waypoint_name_;
+  uint8_t nav_result_code_ = static_cast<uint8_t>(rclcpp_action::ResultCode::UNKNOWN);
+  uint16_t nav_error_code_ = nav2_msgs::action::NavigateToPose::Result::NONE;
+  std::string nav_error_msg_;
+  std::string status_message_ = "Idle";
 
   rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr nav_to_pose_client_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr

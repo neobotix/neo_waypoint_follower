@@ -18,6 +18,12 @@ builtin_interfaces/Duration navigation_time
 # High-level looper state
 uint8 looper_state                      # see enum below
 
+# Latest Nav2 action outcome (for failure diagnostics)
+uint8 nav_result_code                   # raw rclcpp_action ResultCode
+uint16 nav_error_code                   # NavigateToPose.Result error_code
+string nav_error_msg                    # NavigateToPose.Result error_msg
+string status_message                   # human-readable current state summary
+
 # Enums
 uint8 LOOPER_IDLE     = 0   # node up, not started (after boot or cancel)
 uint8 LOOPER_RUNNING  = 1   # actively navigating a goal (or just sent)

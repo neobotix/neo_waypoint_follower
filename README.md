@@ -80,6 +80,10 @@ It provides two core functionalities:
       - `LOOPER_PAUSED = 3`
       - `LOOPER_FINISHED = 4`
       - `LOOPER_ERROR = 5`
+    - `uint8 nav_result_code` — raw `rclcpp_action::ResultCode` from latest NavigateToPose result
+    - `uint16 nav_error_code` — `NavigateToPose.Result.error_code`
+    - `string nav_error_msg` — `NavigateToPose.Result.error_msg`
+    - `string status_message` — human-readable state/error summary
 
 - **Message: `neo_waypoint_follower/Waypoints`**
   - `std_msgs/Header header`
@@ -90,6 +94,8 @@ It provides two core functionalities:
   - Lowering `repeat_count` below the current loop index will cause the run to finish right after the current goal completes.
   - Changing `wait_at_waypoint_ms` does not affect an already running timer; it takes effect from the next waypoint.
   - If only one waypoint is loaded, single-goal mode is activated automatically.
+  - Start-time busy conditions are reported by `/start_waypoint_loop` Trigger response (`success=false`, message).
+  - Runtime action failures (for example ABORTED) are surfaced via `LOOPER_ERROR` + `nav_result_code/nav_error_code/nav_error_msg`.
 
 - **Runtime note:**
   - The `yaml_file` parameter is read when you press Start. To switch waypoint files at runtime, set the param and call Start again:
