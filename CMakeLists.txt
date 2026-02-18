@@ -34,6 +34,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/VaultSaveCurrent.srv"
   "srv/VaultLoadToLooper.srv"
   "srv/VaultPreview.srv"
+  "srv/VaultDelete.srv"
+  "srv/VaultRename.srv"
   DEPENDENCIES std_msgs geometry_msgs builtin_interfaces
 )
 

@@ -21,6 +21,8 @@
 #include <neo_waypoint_follower/srv/vault_save_current.hpp>
 #include <neo_waypoint_follower/srv/vault_load_to_looper.hpp>
 #include <neo_waypoint_follower/srv/vault_preview.hpp>
+#include <neo_waypoint_follower/srv/vault_delete.hpp>
+#include <neo_waypoint_follower/srv/vault_rename.hpp>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
@@ -87,6 +89,18 @@ public:
     preview_service_ = this->create_service<neo_waypoint_follower::srv::VaultPreview>(
       "/vault/preview_once",
       std::bind(&VaultManager::previewCallback, this, std::placeholders::_1, std::placeholders::_2),
+      rclcpp::ServicesQoS(),
+      services_cbg_);
+
+    delete_service_ = this->create_service<neo_waypoint_follower::srv::VaultDelete>(
+      "/vault/delete",
+      std::bind(&VaultManager::deleteCallback, this, std::placeholders::_1, std::placeholders::_2),
+      rclcpp::ServicesQoS(),
+      services_cbg_);
+
+    rename_service_ = this->create_service<neo_waypoint_follower::srv::VaultRename>(
+      "/vault/rename",
+      std::bind(&VaultManager::renameCallback, this, std::placeholders::_1, std::placeholders::_2),
       rclcpp::ServicesQoS(),
       services_cbg_);
 
@@ -536,6 +550,164 @@ private:
     res->message = "Published preview to /vault/preview_waypoints";
   }
 
+  // Returns true if `path` resolves to a file strictly inside vault_dir_.
+  bool isInsideVault_(const fs::path &path) const
+  {
+    std::error_code ec;
+    const fs::path canonical_vault = fs::canonical(vault_dir_, ec);
+    if (ec) {
+      return false;
+    }
+    const fs::path canonical_path = fs::weakly_canonical(path, ec);
+    if (ec) {
+      return false;
+    }
+    // path must start with vault dir
+    auto [vault_end, _] = std::mismatch(
+      canonical_vault.begin(), canonical_vault.end(),
+      canonical_path.begin(), canonical_path.end());
+    return vault_end == canonical_vault.end();
+  }
+
+  // /vault/delete
+  void deleteCallback(
+    const std::shared_ptr<neo_waypoint_follower::srv::VaultDelete::Request> req,
+    std::shared_ptr<neo_waypoint_follower::srv::VaultDelete::Response> res)
+  {
+    if (trim_(req->filename).empty()) {
+      res->success = false;
+      res->message = "filename must not be empty";
+      return;
+    }
+
+    const std::string fname = makeFilename_(req->filename);
+    const fs::path path = absolutePath_(fname);
+
+    if (!isInsideVault_(path)) {
+      res->success = false;
+      res->message = "Invalid path: outside vault directory";
+      return;
+    }
+
+    if (!fs::exists(path)) {
+      res->success = false;
+      res->message = "File not found: " + fname;
+      return;
+    }
+
+    std::error_code ec;
+    if (!fs::remove(path, ec) || ec) {
+      res->success = false;
+      res->message = "Failed to delete " + fname + ": " + ec.message();
+      return;
+    }
+
+    RCLCPP_INFO(get_logger(), "Deleted vault file: %s", path.string().c_str());
+    res->success = true;
+    res->message = "Deleted " + fname;
+  }
+
+  // /vault/rename
+  void renameCallback(
+    const std::shared_ptr<neo_waypoint_follower::srv::VaultRename::Request> req,
+    std::shared_ptr<neo_waypoint_follower::srv::VaultRename::Response> res)
+  {
+    if (trim_(req->filename).empty()) {
+      res->success = false;
+      res->message = "filename must not be empty";
+      return;
+    }
+
+    const std::string old_fname = makeFilename_(req->filename);
+    const fs::path old_path = absolutePath_(old_fname);
+
+    if (!isInsideVault_(old_path)) {
+      res->success = false;
+      res->message = "Invalid path: outside vault directory";
+      return;
+    }
+
+    if (!fs::exists(old_path)) {
+      res->success = false;
+      res->message = "File not found: " + old_fname;
+      return;
+    }
+
+    const std::string new_name = trim_(req->new_name);
+    if (new_name.empty()) {
+      res->success = false;
+      res->message = "new_name must not be empty";
+      return;
+    }
+
+    const std::string new_fname = makeFilename_(new_name);
+    const fs::path new_path = absolutePath_(new_fname);
+
+    if (!isInsideVault_(new_path)) {
+      res->success = false;
+      res->message = "Invalid new path: outside vault directory";
+      return;
+    }
+
+    // Load existing YAML to preserve waypoints
+    std::vector<std::pair<std::string, geometry_msgs::msg::PoseStamped>> waypoints;
+    std::string existing_name;
+    std::string existing_desc;
+    if (!loadWaypointsFromYaml_(old_path, waypoints, &existing_name, &existing_desc)) {
+      res->success = false;
+      res->message = "Failed to parse existing YAML: " + old_fname;
+      return;
+    }
+
+    // Update metadata
+    const std::string updated_name = new_name;
+    const std::string updated_desc = trim_(req->new_description);
+
+    // Convert PoseStamped vector to Pose vector for writeVaultYaml_
+    std::vector<std::pair<std::string, geometry_msgs::msg::Pose>> pose_vec;
+    pose_vec.reserve(waypoints.size());
+    for (const auto &kv : waypoints) {
+      pose_vec.emplace_back(kv.first, kv.second.pose);
+    }
+
+    const bool needs_file_rename = (new_fname != old_fname);
+
+    if (needs_file_rename && fs::exists(new_path)) {
+      res->success = false;
+      res->message = "Target file already exists: " + new_fname;
+      return;
+    }
+
+    // Write updated YAML to the target path
+    const fs::path write_path = needs_file_rename ? new_path : old_path;
+    if (!writeVaultYaml_(write_path, updated_name, updated_desc, pose_vec)) {
+      res->success = false;
+      res->message = "Failed to write YAML: " + write_path.string();
+      return;
+    }
+
+    // Remove old file if rename happened
+    if (needs_file_rename) {
+      std::error_code ec;
+      fs::remove(old_path, ec);
+      if (ec) {
+        RCLCPP_WARN(
+          get_logger(),
+          "Renamed file written but old file removal failed: %s — %s",
+          old_path.string().c_str(), ec.message().c_str());
+      }
+    }
+
+    RCLCPP_INFO(
+      get_logger(),
+      "Renamed vault entry: %s -> %s (name: '%s')",
+      old_fname.c_str(), new_fname.c_str(), updated_name.c_str());
+
+    res->success = true;
+    res->message = "Renamed to " + updated_name;
+    res->new_filename = new_fname;
+  }
+
 private:
   std::string vault_dir_;
   std::string looper_node_name_;
@@ -556,6 +728,8 @@ private:
   rclcpp::Service<neo_waypoint_follower::srv::VaultSaveCurrent>::SharedPtr save_service_;
   rclcpp::Service<neo_waypoint_follower::srv::VaultLoadToLooper>::SharedPtr load_service_;
   rclcpp::Service<neo_waypoint_follower::srv::VaultPreview>::SharedPtr preview_service_;
+  rclcpp::Service<neo_waypoint_follower::srv::VaultDelete>::SharedPtr delete_service_;
+  rclcpp::Service<neo_waypoint_follower::srv::VaultRename>::SharedPtr rename_service_;
 
   rclcpp::Client<rcl_interfaces::srv::SetParameters>::SharedPtr looper_set_params_client_;
 };

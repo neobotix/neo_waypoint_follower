@@ -259,6 +259,14 @@ Minimal, production-ready waypoint vault utilities bundled with `neo_waypoint_fo
     - Request: `string filename`
     - Response: `bool success`, `string message`
     - Behavior: publishes a one-shot `neo_waypoint_follower/Waypoints` to `/vault/preview_waypoints` (latched)
+  - `/vault/delete` (`neo_waypoint_follower/srv/VaultDelete`)
+    - Request: `string filename`
+    - Response: `bool success`, `string message`
+    - Behavior: deletes a route YAML from `vault_dir` (filename is sanitized; path traversal is blocked)
+  - `/vault/rename` (`neo_waypoint_follower/srv/VaultRename`)
+    - Request: `string filename`, `string new_name`, `string new_description`
+    - Response: `bool success`, `string message`, `string new_filename`
+    - Behavior: updates route metadata and derives a normalized target filename from `new_name`; moves file when slug changes and rejects collisions
 
 - Topics:
   - `/vault/preview_waypoints` (`neo_waypoint_follower/msg/Waypoints`): One-shot preview published with QoS `transient_local` so late subscribers receive it.
@@ -303,6 +311,17 @@ waypoints:
   ```sh
   ros2 service call /vault/preview_once neo_waypoint_follower/srv/VaultPreview "{filename: patrol_a}"
   ros2 topic echo /vault/preview_waypoints
+  ```
+
+- Delete a route:
+  ```sh
+  ros2 service call /vault/delete neo_waypoint_follower/srv/VaultDelete "{filename: patrol_a}"
+  ```
+
+- Rename route metadata and file slug:
+  ```sh
+  ros2 service call /vault/rename neo_waypoint_follower/srv/VaultRename \
+    "{filename: patrol_a, new_name: 'Warehouse Patrol v2', new_description: 'Updated route'}"
   ```
 
 ### Launch Integration
