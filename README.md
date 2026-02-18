@@ -115,14 +115,15 @@ ros2 launch neo_waypoint_follower waypoint_follower_launch.py
 
 ### Launch Arguments
 
-| Argument            | Default Value                | Description                                         |
-|---------------------|-----------------------------|-----------------------------------------------------|
-| waypoints_topic     | `/waypoints`                | Topic to listen to for waypoints                    |
-| waypoints_yaml      | `<pkg>/config/waypoints.yaml`       | Path to the waypoints YAML file (save & loop)       |
-| frame_id            | `map`                       | Frame ID for waypoints                              |
-| repeat_count        | `100`                       | Number of times to repeat the loop                  |
-| wait_at_waypoint_ms | `200`                       | Time to wait at each waypoint (ms)                  |
-| stop_on_failure     | `true`                      | Stop looping on navigation failure                  |            |
+| Argument            | Default Value                  | Description                                         |
+|---------------------|--------------------------------|-----------------------------------------------------|
+| waypoints_topic     | `/waypoints`                   | Topic to listen to for waypoints                    |
+| save_waypoints_path | `<pkg>/config/waypoints.yaml`  | Path used by `save_waypoints_server`                |
+| load_waypoints_path | `<pkg>/config/waypoints.yaml`  | Path used by `waypoint_looper`                      |
+| frame_id            | `map`                          | Frame ID for waypoints                              |
+| repeat_count        | `100`                          | Number of times to repeat the loop                  |
+| wait_at_waypoint_ms | `200`                          | Time to wait at each waypoint (ms)                  |
+| stop_on_failure     | `true`                         | Stop looping on navigation failure                  |
 
 Example:
 ```sh
@@ -224,7 +225,9 @@ Minimal, production-ready waypoint vault utilities bundled with `neo_waypoint_fo
 ### Purpose
 
 - Owns a simple on-disk vault directory for waypoint YAMLs.
-- Provides services to list, save (via existing saver), load into the looper (params only), and preview waypoints to a latched topic.
+- Provides services to list, save, load into the looper (params only), and preview waypoints to a latched topic.
+- Saves route-level metadata (`name`, `description`) together with waypoints in one YAML write.
+- Preserves route sequence by writing waypoints in Marker ID order (avoids `wp_1, wp_10, wp_2` lexicographic jumps).
 
 ### Defaults
 
@@ -236,18 +239,18 @@ Minimal, production-ready waypoint vault utilities bundled with `neo_waypoint_fo
 
 - Parameters:
   - `vault_dir` (string, default: `/var/lib/neo/waypoints`): Base directory that stores waypoint YAML files.
-  - `save_server_node` (string, default: `/save_waypoints_server`): Target node name for setting `output_file` before saving.
   - `looper_node` (string, default: `/waypoint_looper`): Target node name for setting `yaml_file` (and optional loop params).
   - `frame_id` (string, default: `map`): Frame used when previewing waypoints.
+  - `waypoints_topic` (string, default: `/waypoints`): MarkerArray topic cached for `/vault/save_current`.
 
 - Services:
   - `/vault/list` (`neo_waypoint_follower/srv/VaultList`)
     - Request: empty
-    - Response: `bool success`, `string message`, `string[] filenames`, `int32[] points`, `bool[] has_loop`
+    - Response: `bool success`, `string message`, `string[] filenames`, `int32[] points`, `bool[] has_loop`, `string[] names`, `string[] descriptions`
   - `/vault/save_current` (`neo_waypoint_follower/srv/VaultSaveCurrent`)
-    - Request: `string filename`, `bool allow_overwrite`
+    - Request: `string filename`, `bool allow_overwrite`, `string name`, `string description`
     - Response: `bool success`, `string message`
-    - Behavior: sets `/save_waypoints_server` parameter `output_file` to `<vault_dir>/<filename>.yaml` and calls `/save_waypoints` (Trigger)
+    - Behavior: reads latest MarkerArray from `waypoints_topic`, writes `<vault_dir>/<filename>.yaml` with `metadata` + `waypoints` in one pass
   - `/vault/load_to_looper` (`neo_waypoint_follower/srv/VaultLoadToLooper`)
     - Request: `string filename`, `bool set_loop_params`, `int32 loop_count`, `int32 wait_ms`
     - Response: `bool success`, `string message`
@@ -262,9 +265,12 @@ Minimal, production-ready waypoint vault utilities bundled with `neo_waypoint_fo
 
 ### YAML Structure
 
-Same as used by `save_waypoints_server` and `waypoint_looper`:
+`waypoints` is required. `metadata` is optional
 
 ```yaml
+metadata:
+  name: Warehouse Patrol
+  description: Nightly perimeter route
 waypoints:
   point_1:
     position: {x: 0.0, y: 0.0, z: 0.0}
@@ -281,9 +287,10 @@ waypoints:
   ros2 service call /vault/list neo_waypoint_follower/srv/VaultList {}
   ```
 
-- Save current waypoints (via saver):
+- Save current waypoints with metadata:
   ```sh
-  ros2 service call /vault/save_current neo_waypoint_follower/srv/VaultSaveCurrent "{filename: patrol_a, allow_overwrite: true}"
+  ros2 service call /vault/save_current neo_waypoint_follower/srv/VaultSaveCurrent \
+    "{filename: patrol_a, allow_overwrite: true, name: 'Warehouse Patrol', description: 'Night route'}"
   ```
 
 - Load into looper (set params only):

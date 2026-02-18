@@ -1,7 +1,10 @@
 # Request
 string filename
+string name
+string description
 bool allow_overwrite
+
+# Response
 ---
 bool success
 string message
-

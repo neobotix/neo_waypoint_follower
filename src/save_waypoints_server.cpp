@@ -14,10 +14,11 @@
 
 #include <yaml-cpp/yaml.h>
 
-#include <mutex>
 #include <fstream>
 #include <map>
-#include <regex>
+#include <mutex>
+#include <optional>
+#include <vector>
 
 class SaveWaypointsServer : public rclcpp::Node
 {
@@ -47,6 +48,8 @@ public:
   }
 
 private:
+  using NamedWaypoint = std::pair<std::string, geometry_msgs::msg::Pose>;
+
   /// \brief Callback for incoming waypoint marker arrays.
   ///
   /// Stores the latest marker array for processing when save service is called.
@@ -79,8 +82,8 @@ private:
         copy = *latest_markers_;
       }
 
-      // Extract waypoints from markers
-      auto data = extractWaypoints(copy);
+      // Extract waypoints from markers, preserving marker ID order.
+      const auto data = extractWaypoints(copy);
 
       // Read current output_file param just before writing
       std::string path = output_file_;
@@ -98,9 +101,9 @@ private:
       out << YAML::BeginMap;
       out << YAML::Key << "waypoints" << YAML::Value << YAML::BeginMap;
 
-      for (const auto & kv : data) {
-        const auto & name = kv.first;
-        const auto & pose = kv.second;
+      for (const auto &kv : data) {
+        const auto &name = kv.first;
+        const auto &pose = kv.second;
         out << YAML::Key << name << YAML::Value << YAML::BeginMap;
 
         out << YAML::Key << "position" << YAML::Value << YAML::BeginMap;
@@ -116,7 +119,7 @@ private:
         out << YAML::Key << "w" << YAML::Value << pose.orientation.w;
         out << YAML::EndMap; // orientation
 
-        out << YAML::EndMap; // point_N
+        out << YAML::EndMap; // waypoint
       }
 
       out << YAML::EndMap;   // waypoints
@@ -128,30 +131,26 @@ private:
       res->success = true;
       res->message = "Saved " + std::to_string(data.size()) + " waypoints to " + path;
       RCLCPP_INFO(get_logger(), "%s", res->message.c_str());
-    } catch (const std::exception & e) {
+    } catch (const std::exception &e) {
       res->success = false;
       res->message = std::string("Error: ") + e.what();
       RCLCPP_ERROR(get_logger(), "%s", res->message.c_str());
     }
   }
 
-  struct PoseWrapper {
-    geometry_msgs::msg::Pose pose;
-  };
-
   /// \brief Extract waypoints from visualization marker array.
   ///
   /// Matches text markers (waypoint names) with geometric markers (poses) by ID.
+  /// Returns entries in marker ID order to preserve route sequence.
   ///
   /// \param arr The marker array to process
-  /// \return Map of waypoint names to their poses
-  std::map<std::string, geometry_msgs::msg::Pose> extractWaypoints(
-      const visualization_msgs::msg::MarkerArray & arr)
+  /// \return Ordered list of waypoint name + pose
+  std::vector<NamedWaypoint> extractWaypoints(const visualization_msgs::msg::MarkerArray &arr)
   {
     std::map<int, std::string> text_by_id;
     std::map<int, geometry_msgs::msg::Pose> pose_by_id;
 
-    for (const auto & m : arr.markers) {
+    for (const auto &m : arr.markers) {
       if (m.type == visualization_msgs::msg::Marker::TEXT_VIEW_FACING && !m.text.empty()) {
         text_by_id[m.id] = m.text;
       }
@@ -159,31 +158,42 @@ private:
           m.type == visualization_msgs::msg::Marker::SPHERE ||
           m.type == visualization_msgs::msg::Marker::CYLINDER ||
           m.type == visualization_msgs::msg::Marker::ARROW) {
-          pose_by_id[m.id] = m.pose;
+        pose_by_id[m.id] = m.pose;
       }
     }
 
-    std::map<std::string, geometry_msgs::msg::Pose> result;
-    for (const auto & kv : text_by_id) {
-      int id = kv.first;
-      const std::string & name = kv.second;
+    std::vector<NamedWaypoint> ordered;
+    std::map<std::string, size_t> name_to_index;
+
+    for (const auto &kv : text_by_id) {
+      const int id = kv.first;
+      const std::string &name = kv.second;
       geometry_msgs::msg::Pose pose;
 
-      auto it = pose_by_id.find(id);
-      if (it != pose_by_id.end()) {
-        pose = it->second;
+      const auto pose_it = pose_by_id.find(id);
+      if (pose_it != pose_by_id.end()) {
+        pose = pose_it->second;
       } else {
         // fallback: use text marker pose itself
-        for (const auto & m : arr.markers) {
+        for (const auto &m : arr.markers) {
           if (m.id == id) {
             pose = m.pose;
             break;
           }
         }
       }
-      result[name] = pose;
+
+      const auto seen_it = name_to_index.find(name);
+      if (seen_it == name_to_index.end()) {
+        name_to_index[name] = ordered.size();
+        ordered.emplace_back(name, pose);
+      } else {
+        // Keep first position in sequence, update pose for duplicate name.
+        ordered[seen_it->second].second = pose;
+      }
     }
-    return result;
+
+    return ordered;
   }
 
   // Members
@@ -197,7 +207,7 @@ private:
 };
 
 /// \brief Main entry point for the SaveWaypointsServer node.
-int main(int argc, char ** argv)
+int main(int argc, char **argv)
 {
   rclcpp::init(argc, argv);
   rclcpp::spin(std::make_shared<SaveWaypointsServer>());

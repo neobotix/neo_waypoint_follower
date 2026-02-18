@@ -3,6 +3,7 @@
 bool success
 string message
 string[] filenames
+string[] names
+string[] descriptions
 int32[] points
 bool[] has_loop
-

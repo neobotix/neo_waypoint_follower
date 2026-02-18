@@ -64,7 +64,7 @@ install(TARGETS waypoint_looper
 # Vault Manager Executable
 add_executable(vault_manager src/vault_manager.cpp)
 ament_target_dependencies(vault_manager
-  rclcpp rclcpp_action rclcpp_components std_srvs geometry_msgs yaml-cpp)
+  rclcpp rclcpp_action rclcpp_components std_srvs geometry_msgs visualization_msgs rcl_interfaces yaml-cpp)
 target_link_libraries(vault_manager ${cpp_typesupport_target})
 target_link_libraries(vault_manager yaml-cpp)
 

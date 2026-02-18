@@ -1,5 +1,5 @@
 # Neobotix GmbH
-# Author: Adarsh Karan K P 
+# Author: Adarsh Karan K P
 
 import launch
 from ament_index_python.packages import get_package_share_directory
@@ -9,13 +9,14 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 import os
 
-def execution_stage(context, 
-                    waypoints_topic, 
-                    save_waypoints_path, 
-                    load_waypoints_path, 
-                    frame_id, 
-                    repeat_count, 
-                    wait_at_waypoint_ms, 
+
+def execution_stage(context,
+                    waypoints_topic,
+                    save_waypoints_path,
+                    load_waypoints_path,
+                    frame_id,
+                    repeat_count,
+                    wait_at_waypoint_ms,
                     stop_on_failure
                     ):
 
@@ -59,8 +60,9 @@ def execution_stage(context,
         output='screen',
         parameters=[{
             'vault_dir': '/var/lib/neo/waypoints',
-            'save_server_node': '/save_waypoints_server',
-            'looper_node': '/waypoint_looper'
+            'looper_node': '/waypoint_looper',
+            'frame_id': frame_id_val,
+            'waypoints_topic': waypoints_topic_val
         }]
     )
 
