@@ -42,8 +42,12 @@ It provides two core functionalities:
 - **Parameters:**
   - `yaml_file` (string): Path to the waypoints YAML file
   - `frame_id` (string): Frame ID for waypoints (default: `map`)
+  - `has_loop` (bool): Runtime loop intent flag used for run metadata capture (default: `false`)
   - `repeat_count` (int): Number of times to repeat the waypoint loop (default: `100`)
   - `wait_at_waypoint_ms` (int): Time to wait at each waypoint in milliseconds (default: `200`)
+  - `history_cap` (int): Max retained run history entries (default: `15`, range: `1..200`)
+  - `history_dir` (string): Run history directory (default: `/var/lib/neo/lemma-gui/history`)
+  - `history_file` (string): Run history file name (default: `navigation_runs.json`)
   - `stop_on_failure` (bool): Stop looping on navigation failure (default: `true`)
   - `action_name` (string): Nav2 action server name (default: `/navigate_to_pose`)
   - `odom_topic` (string): Odometry topic for distance tracking (default: `/odom`)
@@ -54,6 +58,9 @@ It provides two core functionalities:
   - `/resume_waypoint_loop` (`std_srvs/srv/Trigger`): Resumes the waypoint loop
   - `/cancel_waypoint_loop` (`std_srvs/srv/Trigger`): Cancels and resets the waypoint loop
   - `/publish_loaded_waypoints` (`std_srvs/srv/Trigger`): Publishes the currently loaded waypoints once to a latched topic
+  - `/run_history/list` (`neo_waypoint_follower/srv/RunHistoryList`): Lists persisted navigation runs
+  - `/run_history/delete` (`neo_waypoint_follower/srv/RunHistoryDelete`): Deletes one run by `run_id`
+  - `/run_history/clear` (`neo_waypoint_follower/srv/RunHistoryClear`): Clears all run history entries
 
 - **Topics:**
   - `/waypoint_loop/metrics` (`neo_waypoint_follower/msg/LooperMetrics`): Aggregated looper metrics (QoS: best_effort, durability_volatile)
@@ -90,12 +97,23 @@ It provides two core functionalities:
   - `string[] names`
   - `geometry_msgs/PoseStamped[] poses`
 
+- **Message: `neo_waypoint_follower/RunHistoryEntry`**
+  - Identity/timing: `run_id`, `started_at_ms`, `ended_at_ms`, `status`, `cause_code`
+  - Route snapshot: `route_name`, `route_description`, `yaml_file`, `route_waypoints`
+  - Route settings snapshot: `has_loop`, `loop_count`, `wait_at_waypoint_ms`, `pauses`
+  - Progress snapshot: `wall_time_sec`, `distance_traveled`, `distance_remaining`, `completion_pct`
+  - Diagnostics: `nav_result_code`, `nav_error_code`, `nav_error_msg`, `status_message`
+
 - **Behavior Notes:**
   - Lowering `repeat_count` below the current loop index will cause the run to finish right after the current goal completes.
   - Changing `wait_at_waypoint_ms` does not affect an already running timer; it takes effect from the next waypoint.
   - If only one waypoint is loaded, single-goal mode is activated automatically.
   - Start-time busy conditions are reported by `/start_waypoint_loop` Trigger response (`success=false`, message).
   - Runtime action failures (for example ABORTED) are surfaced via `LOOPER_ERROR` + `nav_result_code/nav_error_code/nav_error_msg`.
+  - Run history is written by `waypoint_looper` to:
+    - `/var/lib/neo/lemma-gui/history/navigation_runs.json`
+    - File schema: `{ "schemaVersion": 1, "entries": [...] }`
+    - Writes are atomic (`temp file + rename`) and failures are warning-only (navigation continues).
 
 - **Runtime note:**
   - The `yaml_file` parameter is read when you press Start. To switch waypoint files at runtime, set the param and call Start again:
@@ -121,8 +139,8 @@ ros2 launch neo_waypoint_follower waypoint_follower_launch.py
 | save_waypoints_path | `<pkg>/config/waypoints.yaml`  | Path used by `save_waypoints_server`                |
 | load_waypoints_path | `<pkg>/config/waypoints.yaml`  | Path used by `waypoint_looper`                      |
 | frame_id            | `map`                          | Frame ID for waypoints                              |
-| repeat_count        | `100`                          | Number of times to repeat the loop                  |
-| wait_at_waypoint_ms | `200`                          | Time to wait at each waypoint (ms)                  |
+| repeat_count        | `10`                           | Number of times to repeat the loop                  |
+| wait_at_waypoint_ms | `500`                          | Time to wait at each waypoint (ms)                  |
 | stop_on_failure     | `true`                         | Stop looping on navigation failure                  |
 
 Example:
@@ -205,11 +223,20 @@ Make sure your custom YAML file follows the template provided in `config/waypoin
 You can now change parameters at runtime using:
 
   ```sh
+  ros2 param set /waypoint_looper has_loop true
   ros2 param set /waypoint_looper repeat_count 2
   ros2 param set /waypoint_looper wait_at_waypoint_ms 0
   ```
 
-  This allows you to adjust the loop count and wait time while the node is running. See "Behavior Notes" above for details on how these changes affect execution.
+  This allows you to adjust loop intent/count/wait while the node is running. See "Behavior Notes" above for details on how these changes affect execution.
+
+6. **Run history operations**
+
+   ```sh
+   ros2 service call /run_history/list neo_waypoint_follower/srv/RunHistoryList {}
+   ros2 service call /run_history/delete neo_waypoint_follower/srv/RunHistoryDelete "{run_id: run_20260224T171533412Z_a3f91c}"
+   ros2 service call /run_history/clear neo_waypoint_follower/srv/RunHistoryClear {}
+   ```
 
 
 ## Further Information
@@ -335,3 +362,22 @@ waypoints:
 ros2 launch neo_waypoint_follower waypoint_follower_launch.py \
   vault_dir:=/var/lib/neo/waypoints
 ```
+
+---
+
+## Integration Notes (2026-02-24)
+
+### 3.11 Route YAML settings persistence (vault_manager)
+
+- `metadata` now persists route settings together with waypoints: `has_loop`, `loop_count`, `wait_at_waypoint_ms`.
+- `/vault/save_current` accepts `has_loop`, `loop_count`, `wait_ms` and writes metadata in one YAML save pass.
+- `/vault/list` returns `has_loop`, `loop_count`, `wait_ms` arrays; missing numeric metadata is preserved as unspecified (`-1`) instead of inventing defaults.
+- `/vault/load_to_looper` can apply `repeat_count` and `wait_at_waypoint_ms` when `set_loop_params=true`.
+
+### 3.4 Robot-shared run history persistence (waypoint_looper)
+
+- Run history is now owned by `waypoint_looper` and persisted on robot disk at `/var/lib/neo/lemma-gui/history/navigation_runs.json`.
+- JSON file is versioned: `{ "schemaVersion": 1, "entries": [...] }`.
+- New services: `/run_history/list`, `/run_history/delete`, `/run_history/clear`.
+- `run_id` format: `run_YYYYMMDDTHHMMSSmmmZ_<6hex>`.
+- Persistence failures are warning-only for active navigation lifecycle events (run execution continues).

@@ -1,0 +1,6 @@
+# Request
+---
+bool success
+string message
+uint32 cap
+neo_waypoint_follower/RunHistoryEntry[] entries

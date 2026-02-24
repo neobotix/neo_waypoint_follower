@@ -29,7 +29,11 @@ find_package(rcl_interfaces REQUIRED)
 # Interface generation
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/LooperMetrics.msg"
+  "msg/RunHistoryEntry.msg"
   "msg/Waypoints.msg"
+  "srv/RunHistoryList.srv"
+  "srv/RunHistoryDelete.srv"
+  "srv/RunHistoryClear.srv"
   "srv/VaultList.srv"
   "srv/VaultSaveCurrent.srv"
   "srv/VaultLoadToLooper.srv"
@@ -54,7 +58,7 @@ install(TARGETS save_waypoints_server
 # Waypoint Looper Executable
 add_executable(waypoint_looper src/waypoint_looper.cpp)
 ament_target_dependencies(waypoint_looper
-  rclcpp rclcpp_action nav2_msgs geometry_msgs std_srvs)
+  rclcpp rclcpp_action nav2_msgs geometry_msgs std_srvs nav_msgs rcl_interfaces)
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(waypoint_looper ${cpp_typesupport_target})
 

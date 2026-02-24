@@ -22,6 +22,15 @@
 #include <chrono>
 #include <atomic>
 #include <cstdint>
+#include <ctime>
+#include <iomanip>
+#include <fstream>
+#include <filesystem>
+#include <mutex>
+#include <random>
+#include <sstream>
+#include <algorithm>
+#include <cctype>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 
@@ -35,8 +44,17 @@
 #include <builtin_interfaces/msg/duration.hpp>
 #include <yaml-cpp/yaml.h>
 #include <neo_waypoint_follower/msg/looper_metrics.hpp>
+#include <neo_waypoint_follower/msg/run_history_entry.hpp>
 #include <neo_waypoint_follower/msg/waypoints.hpp>
+#include <neo_waypoint_follower/srv/run_history_list.hpp>
+#include <neo_waypoint_follower/srv/run_history_delete.hpp>
+#include <neo_waypoint_follower/srv/run_history_clear.hpp>
 using LooperMetrics = neo_waypoint_follower::msg::LooperMetrics;
+using RunHistoryEntryMsg = neo_waypoint_follower::msg::RunHistoryEntry;
+using RunHistoryListSrv = neo_waypoint_follower::srv::RunHistoryList;
+using RunHistoryDeleteSrv = neo_waypoint_follower::srv::RunHistoryDelete;
+using RunHistoryClearSrv = neo_waypoint_follower::srv::RunHistoryClear;
+namespace fs = std::filesystem;
 
 class WaypointLooper : public rclcpp::Node {
 public:
@@ -50,6 +68,7 @@ public:
   {
     yaml_file_    = declare_parameter<std::string>("yaml_file", std::string(getenv("HOME")) + "/waypoints.yaml");
     frame_id_     = declare_parameter<std::string>("frame_id", "map");
+    has_loop_param_ = declare_parameter<bool>("has_loop", false);
     
     // repeat_count descriptor
     rcl_interfaces::msg::ParameterDescriptor repeat_count_descriptor;
@@ -70,6 +89,18 @@ public:
     wait_ms_limits.step       = 1;
     wait_desc.integer_range = {wait_ms_limits};
     wait_ms_descriptor_ = declare_parameter<int>("wait_at_waypoint_ms", 200, wait_desc);
+
+    rcl_interfaces::msg::ParameterDescriptor history_cap_desc;
+    history_cap_desc.description = "Max navigation run history entries retained";
+    rcl_interfaces::msg::IntegerRange history_cap_limits;
+    history_cap_limits.from_value = 1;
+    history_cap_limits.to_value = 200;
+    history_cap_limits.step = 1;
+    history_cap_desc.integer_range = {history_cap_limits};
+    history_cap_ = declare_parameter<int>("history_cap", 15, history_cap_desc);
+    history_dir_ = declare_parameter<std::string>("history_dir", "/var/lib/neo/lemma-gui/history");
+    history_file_name_ = declare_parameter<std::string>("history_file", "navigation_runs.json");
+    history_file_path_ = (fs::path(history_dir_) / history_file_name_).string();
     
     action_name_  = declare_parameter<std::string>("action_name", "/navigate_to_pose");
     stop_on_fail_ = declare_parameter<bool>("stop_on_failure", true);
@@ -94,6 +125,18 @@ public:
     cancel_srv_ = create_service<std_srvs::srv::Trigger>(
       "cancel_waypoint_loop",
       std::bind(&WaypointLooper::cancelCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+    run_history_list_srv_ = create_service<RunHistoryListSrv>(
+      "/run_history/list",
+      std::bind(&WaypointLooper::runHistoryListCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+    run_history_delete_srv_ = create_service<RunHistoryDeleteSrv>(
+      "/run_history/delete",
+      std::bind(&WaypointLooper::runHistoryDeleteCallback, this, std::placeholders::_1, std::placeholders::_2));
+
+    run_history_clear_srv_ = create_service<RunHistoryClearSrv>(
+      "/run_history/clear",
+      std::bind(&WaypointLooper::runHistoryClearCallback, this, std::placeholders::_1, std::placeholders::_2));
 
     // Odom subscription for distance tracking
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
@@ -126,6 +169,13 @@ public:
       std::bind(&WaypointLooper::publishLoadedWaypointsCallback, this,
                 std::placeholders::_1, std::placeholders::_2));
 
+    if (!loadRunHistoryFromDisk_()) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Run history load failed (path: %s). Starting with empty history.",
+        history_file_path_.c_str());
+    }
+
     // Parameter change callback. can be updated anytime
     param_callback_handle_ = this->add_on_set_parameters_callback(
       [this](const std::vector<rclcpp::Parameter> & params)
@@ -135,6 +185,8 @@ public:
 
         int    updated_wait_ms   = wait_ms_descriptor_;
         size_t updated_repeat_count = repeat_count_;
+        bool   updated_has_loop = has_loop_param_;
+        int    updated_history_cap = history_cap_;
 
         // Validate both params
         for (const auto & p : params) {
@@ -156,15 +208,31 @@ public:
               return out;
             }
             updated_repeat_count = static_cast<size_t>(v);
+          } else if (p.get_name() == "has_loop") {
+            updated_has_loop = p.as_bool();
+          } else if (p.get_name() == "history_cap") {
+            int v = p.as_int();
+            if (v < 1 || v > 200) {
+              out.successful = false;
+              out.reason = "history_cap must be in [1, 200]";
+              return out;
+            }
+            updated_history_cap = v;
           }
         }
 
         // Update
         wait_ms_descriptor_ = updated_wait_ms;
         repeat_count_ = updated_repeat_count;
-        RCLCPP_INFO(get_logger(), "Parameters updated: wait_at_waypoint_ms=%d, repeat_count=%zu",
+        has_loop_param_ = updated_has_loop;
+        history_cap_ = updated_history_cap;
+        trimRunHistoryToCap_();
+        (void)persistRunHistoryToDisk_();
+        RCLCPP_INFO(get_logger(), "Parameters updated: wait_at_waypoint_ms=%d, repeat_count=%zu, has_loop=%s, history_cap=%d",
                     wait_ms_descriptor_,
-                    repeat_count_
+                    repeat_count_,
+                    has_loop_param_ ? "true" : "false",
+                    history_cap_
                 );
 
         return out;
@@ -172,6 +240,469 @@ public:
   }
 
 private:
+  static std::string trimCopy_(const std::string &value)
+  {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+      return "";
+    }
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+  }
+
+  static std::string jsonEscape_(const std::string &value)
+  {
+    std::string out;
+    out.reserve(value.size() + 16);
+    for (unsigned char ch : value) {
+      switch (ch) {
+        case '\\': out += "\\\\"; break;
+        case '"': out += "\\\""; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+          if (ch < 0x20) {
+            std::ostringstream esc;
+            esc << "\\u"
+                << std::hex << std::uppercase << std::setw(4) << std::setfill('0')
+                << static_cast<unsigned int>(ch);
+            out += esc.str();
+          } else {
+            out.push_back(static_cast<char>(ch));
+          }
+          break;
+      }
+    }
+    return out;
+  }
+
+  template<typename T>
+  static T nodeScalarOr_(const YAML::Node &node, const T &fallback)
+  {
+    if (!node || !node.IsScalar()) {
+      return fallback;
+    }
+    try {
+      return node.as<T>();
+    } catch (...) {
+      return fallback;
+    }
+  }
+
+  static bool parseBoolNode_(const YAML::Node &node, bool fallback)
+  {
+    if (!node || !node.IsScalar()) return fallback;
+    try {
+      return node.as<bool>();
+    } catch (...) {
+      try {
+        std::string lower = trimCopy_(node.as<std::string>());
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+          return static_cast<char>(std::tolower(c));
+        });
+        if (lower == "true" || lower == "1" || lower == "yes" || lower == "on") return true;
+        if (lower == "false" || lower == "0" || lower == "no" || lower == "off") return false;
+      } catch (...) {
+        return fallback;
+      }
+      return fallback;
+    }
+  }
+
+  uint64_t nowMs_() const
+  {
+    const auto now = std::chrono::system_clock::now();
+    return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
+  }
+
+  std::string generateRunId_() const
+  {
+    const auto now = std::chrono::system_clock::now();
+    const auto ms_since_epoch = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch());
+    const auto millis = ms_since_epoch.count() % 1000;
+    const std::time_t t = std::chrono::system_clock::to_time_t(now);
+
+    std::tm tm_utc{};
+#if defined(_WIN32)
+    gmtime_s(&tm_utc, &t);
+#else
+    gmtime_r(&t, &tm_utc);
+#endif
+
+    std::ostringstream ts;
+    ts << std::put_time(&tm_utc, "%Y%m%dT%H%M%S")
+       << std::setw(3) << std::setfill('0') << millis << "Z";
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<int> hex_dist(0, 15);
+    std::ostringstream suffix;
+    for (int i = 0; i < 6; ++i) {
+      suffix << std::hex << std::nouppercase << hex_dist(gen);
+    }
+
+    return "run_" + ts.str() + "_" + suffix.str();
+  }
+
+  std::string deriveRouteName_() const
+  {
+    const std::string from_meta = trimCopy_(loaded_route_name_);
+    if (!from_meta.empty()) {
+      return from_meta;
+    }
+    if (!active_yaml_file_.empty()) {
+      const fs::path p(active_yaml_file_);
+      const std::string stem = trimCopy_(p.stem().string());
+      if (!stem.empty()) {
+        return stem;
+      }
+      const std::string base = trimCopy_(p.filename().string());
+      if (!base.empty()) {
+        return base;
+      }
+    }
+    return "Unnamed route";
+  }
+
+  float computeCompletionPct_(const std::string &status, float traveled, float remaining) const
+  {
+    if (status == "SUCCEEDED") return 100.0F;
+    const double denom = static_cast<double>(traveled) + static_cast<double>(remaining);
+    if (denom <= 1e-6) return 0.0F;
+    const double pct = (static_cast<double>(traveled) / denom) * 100.0;
+    return static_cast<float>(std::max(0.0, std::min(99.9, pct)));
+  }
+
+  std::string determineFailureCauseCode_() const
+  {
+    auto contains_ci = [](const std::string &text, const std::string &needle) -> bool {
+      auto lowered_text = text;
+      auto lowered_needle = needle;
+      std::transform(lowered_text.begin(), lowered_text.end(), lowered_text.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+      });
+      std::transform(lowered_needle.begin(), lowered_needle.end(), lowered_needle.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+      });
+      return lowered_text.find(lowered_needle) != std::string::npos;
+    };
+
+    if (contains_ci(status_message_, "telemetry stale") ||
+        contains_ci(status_message_, "telemetry degraded") ||
+        contains_ci(status_message_, "stale telemetry") ||
+        contains_ci(nav_error_msg_, "telemetry stale") ||
+        contains_ci(nav_error_msg_, "telemetry degraded") ||
+        contains_ci(nav_error_msg_, "stale telemetry")) {
+      return "TELEMETRY_STALE";
+    }
+    if (status_message_.find("Goal rejected") != std::string::npos) return "GOAL_REJECTED";
+    if (nav_error_code_ == 104) return "CONTROLLER_PATIENCE_EXCEEDED";
+    if (nav_error_code_ == 106) return "NO_VALID_CONTROL";
+    if (nav_error_code_ == 103) return "INVALID_PATH";
+    if (nav_error_code_ == 105) return "FAILED_TO_MAKE_PROGRESS";
+    if (nav_result_code_ == static_cast<uint8_t>(rclcpp_action::ResultCode::ABORTED)) return "NAV2_ABORTED";
+    return "UNKNOWN_ERROR";
+  }
+
+  void beginRunContext_()
+  {
+    run_context_active_ = true;
+    run_id_ = generateRunId_();
+    run_started_at_ms_ = nowMs_();
+    run_pause_count_ = 0;
+    run_route_waypoints_ = static_cast<uint32_t>(waypoints_.size());
+    run_loop_count_ = static_cast<uint32_t>(effective_repeat_count());
+    run_wait_ms_ = effective_delay_ms();
+    run_yaml_file_ = active_yaml_file_;
+    run_route_name_ = deriveRouteName_();
+    run_route_description_ = trimCopy_(loaded_route_description_);
+
+    bool inferred_has_loop = has_loop_param_;
+    if (loaded_has_loop_set_) {
+      inferred_has_loop = loaded_has_loop_;
+    }
+    if (has_loop_param_) {
+      inferred_has_loop = true;
+    }
+    if (effective_repeat_count() > 1) {
+      inferred_has_loop = true;
+    }
+    run_has_loop_ = inferred_has_loop;
+  }
+
+  std::string runHistoryToJson_() const
+  {
+    std::ostringstream out;
+    out << "{\n";
+    out << "  \"schemaVersion\": 1,\n";
+    out << "  \"entries\": [\n";
+    for (size_t i = 0; i < run_history_entries_.size(); ++i) {
+      const auto &e = run_history_entries_[i];
+      out << "    {\n";
+      out << "      \"run_id\": \"" << jsonEscape_(e.run_id) << "\",\n";
+      out << "      \"started_at_ms\": " << e.started_at_ms << ",\n";
+      out << "      \"ended_at_ms\": " << e.ended_at_ms << ",\n";
+      out << "      \"status\": \"" << jsonEscape_(e.status) << "\",\n";
+      out << "      \"cause_code\": \"" << jsonEscape_(e.cause_code) << "\",\n";
+      out << "      \"route_name\": \"" << jsonEscape_(e.route_name) << "\",\n";
+      out << "      \"route_description\": \"" << jsonEscape_(e.route_description) << "\",\n";
+      out << "      \"yaml_file\": \"" << jsonEscape_(e.yaml_file) << "\",\n";
+      out << "      \"route_waypoints\": " << e.route_waypoints << ",\n";
+      out << "      \"has_loop\": " << (e.has_loop ? "true" : "false") << ",\n";
+      out << "      \"loop_count\": " << e.loop_count << ",\n";
+      out << "      \"wait_at_waypoint_ms\": " << e.wait_at_waypoint_ms << ",\n";
+      out << "      \"pauses\": " << e.pauses << ",\n";
+      out << "      \"wall_time_sec\": " << e.wall_time_sec << ",\n";
+      out << "      \"distance_traveled\": " << e.distance_traveled << ",\n";
+      out << "      \"distance_remaining\": " << e.distance_remaining << ",\n";
+      out << "      \"completion_pct\": " << e.completion_pct << ",\n";
+      out << "      \"nav_result_code\": " << static_cast<unsigned int>(e.nav_result_code) << ",\n";
+      out << "      \"nav_error_code\": " << e.nav_error_code << ",\n";
+      out << "      \"nav_error_msg\": \"" << jsonEscape_(e.nav_error_msg) << "\",\n";
+      out << "      \"status_message\": \"" << jsonEscape_(e.status_message) << "\"\n";
+      out << "    }" << (i + 1 < run_history_entries_.size() ? "," : "") << "\n";
+    }
+    out << "  ]\n";
+    out << "}\n";
+    return out.str();
+  }
+
+  bool persistRunHistoryToDisk_()
+  {
+    std::lock_guard<std::mutex> lock(run_history_mutex_);
+    try {
+      fs::create_directories(history_dir_);
+      const fs::path target(history_file_path_);
+      const fs::path temp = target.string() + ".tmp";
+      std::ofstream fout(temp, std::ios::out | std::ios::trunc);
+      if (!fout.is_open()) {
+        return false;
+      }
+      fout << runHistoryToJson_();
+      fout.close();
+      if (!fout) {
+        return false;
+      }
+      std::error_code ec;
+      fs::rename(temp, target, ec);
+      if (ec) {
+        fs::remove(temp, ec);
+        return false;
+      }
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
+
+  void trimRunHistoryToCap_()
+  {
+    std::lock_guard<std::mutex> lock(run_history_mutex_);
+    if (history_cap_ <= 0) return;
+    const size_t cap = static_cast<size_t>(history_cap_);
+    if (run_history_entries_.size() > cap) {
+      run_history_entries_.resize(cap);
+    }
+  }
+
+  bool loadRunHistoryFromDisk_()
+  {
+    std::lock_guard<std::mutex> lock(run_history_mutex_);
+    run_history_entries_.clear();
+    try {
+      const fs::path p(history_file_path_);
+      if (!fs::exists(p)) {
+        return true;
+      }
+      YAML::Node root = YAML::LoadFile(p.string());
+      const int schema_version = nodeScalarOr_(root["schemaVersion"], 0);
+      if (schema_version != 1) {
+        RCLCPP_WARN(get_logger(), "Unsupported run history schemaVersion=%d", schema_version);
+        return false;
+      }
+      const YAML::Node entries = root["entries"];
+      if (!entries || !entries.IsSequence()) {
+        return true;
+      }
+      run_history_entries_.reserve(entries.size());
+      for (const auto &item : entries) {
+        RunHistoryEntryMsg e;
+        e.run_id = nodeScalarOr_(item["run_id"], std::string());
+        if (e.run_id.empty()) continue;
+        e.started_at_ms = nodeScalarOr_(item["started_at_ms"], static_cast<uint64_t>(0));
+        e.ended_at_ms = nodeScalarOr_(item["ended_at_ms"], static_cast<uint64_t>(0));
+        e.status = nodeScalarOr_(item["status"], std::string("FAILED"));
+        e.cause_code = nodeScalarOr_(item["cause_code"], std::string("UNKNOWN_ERROR"));
+        e.route_name = nodeScalarOr_(item["route_name"], std::string("Unnamed route"));
+        e.route_description = nodeScalarOr_(item["route_description"], std::string());
+        e.yaml_file = nodeScalarOr_(item["yaml_file"], std::string());
+        e.route_waypoints = nodeScalarOr_(item["route_waypoints"], static_cast<uint32_t>(0));
+        e.has_loop = parseBoolNode_(item["has_loop"], false);
+        e.loop_count = nodeScalarOr_(item["loop_count"], static_cast<uint32_t>(1));
+        e.wait_at_waypoint_ms = nodeScalarOr_(item["wait_at_waypoint_ms"], static_cast<int32_t>(0));
+        e.pauses = nodeScalarOr_(item["pauses"], static_cast<uint32_t>(0));
+        e.wall_time_sec = nodeScalarOr_(item["wall_time_sec"], 0.0F);
+        e.distance_traveled = nodeScalarOr_(item["distance_traveled"], 0.0F);
+        e.distance_remaining = nodeScalarOr_(item["distance_remaining"], 0.0F);
+        e.completion_pct = nodeScalarOr_(item["completion_pct"], 0.0F);
+        e.nav_result_code = nodeScalarOr_(item["nav_result_code"], static_cast<uint8_t>(0));
+        e.nav_error_code = nodeScalarOr_(item["nav_error_code"], static_cast<uint16_t>(0));
+        e.nav_error_msg = nodeScalarOr_(item["nav_error_msg"], std::string());
+        e.status_message = nodeScalarOr_(item["status_message"], std::string());
+        run_history_entries_.push_back(e);
+      }
+      if (history_cap_ > 0 && run_history_entries_.size() > static_cast<size_t>(history_cap_)) {
+        run_history_entries_.resize(static_cast<size_t>(history_cap_));
+      }
+      return true;
+    } catch (const std::exception &e) {
+      RCLCPP_WARN(get_logger(), "Failed to load run history: %s", e.what());
+      run_history_entries_.clear();
+      return false;
+    }
+  }
+
+  void finalizeRunHistory_(const std::string &status, const std::string &cause_code)
+  {
+    if (!run_context_active_) return;
+
+    const uint64_t ended_at_ms = nowMs_();
+    const uint64_t elapsed_ms = ended_at_ms >= run_started_at_ms_
+      ? (ended_at_ms - run_started_at_ms_)
+      : 0;
+    const float wall_time_sec = static_cast<float>(elapsed_ms) / 1000.0F;
+    const float traveled = static_cast<float>(std::max(0.0, run_distance_));
+    const float remaining = static_cast<float>(std::max(0.0, distance_remaining_));
+
+    RunHistoryEntryMsg entry;
+    entry.run_id = run_id_.empty() ? generateRunId_() : run_id_;
+    entry.started_at_ms = run_started_at_ms_;
+    entry.ended_at_ms = ended_at_ms;
+    entry.status = status;
+    entry.cause_code = cause_code;
+    entry.route_name = run_route_name_.empty() ? "Unnamed route" : run_route_name_;
+    entry.route_description = run_route_description_;
+    entry.yaml_file = run_yaml_file_;
+    entry.route_waypoints = run_route_waypoints_;
+    entry.has_loop = run_has_loop_;
+    entry.loop_count = run_loop_count_;
+    entry.wait_at_waypoint_ms = run_wait_ms_;
+    entry.pauses = run_pause_count_;
+    entry.wall_time_sec = wall_time_sec;
+    entry.distance_traveled = traveled;
+    entry.distance_remaining = remaining;
+    entry.completion_pct = computeCompletionPct_(status, traveled, remaining);
+    entry.nav_result_code = nav_result_code_;
+    entry.nav_error_code = nav_error_code_;
+    entry.nav_error_msg = nav_error_msg_;
+    entry.status_message = status_message_;
+
+    {
+      std::lock_guard<std::mutex> lock(run_history_mutex_);
+      run_history_entries_.insert(run_history_entries_.begin(), entry);
+      if (history_cap_ > 0 && run_history_entries_.size() > static_cast<size_t>(history_cap_)) {
+        run_history_entries_.resize(static_cast<size_t>(history_cap_));
+      }
+    }
+
+    if (!persistRunHistoryToDisk_()) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Failed to persist run history (status=%s, run_id=%s) to %s",
+        status.c_str(),
+        entry.run_id.c_str(),
+        history_file_path_.c_str());
+    }
+
+    run_context_active_ = false;
+    run_started_at_ms_ = 0;
+    run_pause_count_ = 0;
+    run_route_waypoints_ = 0;
+    run_has_loop_ = false;
+    run_loop_count_ = 1;
+    run_wait_ms_ = 0;
+    run_yaml_file_.clear();
+    run_route_name_.clear();
+    run_route_description_.clear();
+    run_id_.clear();
+  }
+
+  void runHistoryListCallback(
+    const std::shared_ptr<RunHistoryListSrv::Request> /*req*/,
+    std::shared_ptr<RunHistoryListSrv::Response> res)
+  {
+    std::lock_guard<std::mutex> lock(run_history_mutex_);
+    res->success = true;
+    res->message = "OK";
+    res->cap = static_cast<uint32_t>(std::max(0, history_cap_));
+    res->entries = run_history_entries_;
+  }
+
+  void runHistoryDeleteCallback(
+    const std::shared_ptr<RunHistoryDeleteSrv::Request> req,
+    std::shared_ptr<RunHistoryDeleteSrv::Response> res)
+  {
+    const std::string id = trimCopy_(req->run_id);
+    if (id.empty()) {
+      res->success = false;
+      res->message = "run_id is required";
+      return;
+    }
+
+    bool deleted = false;
+    {
+      std::lock_guard<std::mutex> lock(run_history_mutex_);
+      const auto it = std::find_if(run_history_entries_.begin(), run_history_entries_.end(),
+        [&id](const RunHistoryEntryMsg &e) { return e.run_id == id; });
+      if (it != run_history_entries_.end()) {
+        run_history_entries_.erase(it);
+        deleted = true;
+      }
+    }
+
+    if (!deleted) {
+      res->success = false;
+      res->message = "run_id not found";
+      return;
+    }
+
+    if (!persistRunHistoryToDisk_()) {
+      res->success = false;
+      res->message = "Deleted in memory but failed to persist";
+      RCLCPP_WARN(get_logger(), "%s", res->message.c_str());
+      return;
+    }
+
+    res->success = true;
+    res->message = "Deleted";
+  }
+
+  void runHistoryClearCallback(
+    const std::shared_ptr<RunHistoryClearSrv::Request> /*req*/,
+    std::shared_ptr<RunHistoryClearSrv::Response> res)
+  {
+    uint32_t deleted_count = 0;
+    {
+      std::lock_guard<std::mutex> lock(run_history_mutex_);
+      deleted_count = static_cast<uint32_t>(run_history_entries_.size());
+      run_history_entries_.clear();
+    }
+
+    if (!persistRunHistoryToDisk_()) {
+      res->success = false;
+      res->message = "Cleared in memory but failed to persist";
+      res->deleted_count = deleted_count;
+      RCLCPP_WARN(get_logger(), "%s", res->message.c_str());
+      return;
+    }
+
+    res->success = true;
+    res->message = "Cleared";
+    res->deleted_count = deleted_count;
+  }
+
   // services
   /**
    * @brief Service callback to start waypoint loop execution.
@@ -202,6 +733,8 @@ private:
     // Reset odometry and progress tracking
     run_distance_ = 0.0;
     leg_distance_ = 0.0;
+    run_context_active_ = false;
+    run_pause_count_ = 0;
 
     have_last_odom_ = false;
     running_        = true;
@@ -215,6 +748,7 @@ private:
     status_message_ = single_goal_mode_ ? "Single-goal run started" : "Waypoint loop started";
     resetNav2Feedback_();
     resetNav2Result_();
+    beginRunContext_();
     publishMetrics_();
     sendNext();
     starting_ = false;
@@ -244,6 +778,9 @@ private:
     if (current_goal_) { auto future = nav_to_pose_client_->async_cancel_goal(current_goal_); (void)future; }
     looper_state_ = LooperMetrics::LOOPER_PAUSED;
     status_message_ = "Paused by user";
+    if (run_context_active_) {
+      ++run_pause_count_;
+    }
     res->success = true; res->message = "Paused";
     publishMetrics_();
   }
@@ -282,6 +819,9 @@ private:
   void cancelCallback(const std::shared_ptr<std_srvs::srv::Trigger::Request>,
                       std::shared_ptr<std_srvs::srv::Trigger::Response> res)
   {
+    status_message_ = "Canceled and reset";
+    finalizeRunHistory_("CANCELLED", "USER_CANCELLED");
+
     // Cancel timer and active goal, reset all indices and progress
     if (delay_timer_) delay_timer_->cancel();
     paused_ = false; running_ = false; goal_in_flight_ = false; starting_ = false;
@@ -289,7 +829,6 @@ private:
     loop_idx_ = 0; wp_idx_ = 0;
     run_distance_ = 0.0; leg_distance_ = 0.0; have_last_odom_ = false;
     looper_state_ = LooperMetrics::LOOPER_IDLE;
-    status_message_ = "Canceled and reset";
     resetNav2Feedback_();
     resetNav2Result_();
     res->success = true; res->message = "Canceled and reset.";
@@ -307,12 +846,31 @@ private:
    */
   bool loadYaml() {
     try {
-
       std::string yaml_path = yaml_file_;
       // use the updated value if file path has been changed at runtime
       (void)this->get_parameter("yaml_file", yaml_path);
+      active_yaml_file_ = yaml_path;
       YAML::Node root = YAML::LoadFile(yaml_path);
       YAML::Node waypoints = root["waypoints"];
+      if (!waypoints || !waypoints.IsMap()) {
+        RCLCPP_ERROR(get_logger(), "YAML has no 'waypoints' map: %s", yaml_path.c_str());
+        return false;
+      }
+
+      loaded_route_name_.clear();
+      loaded_route_description_.clear();
+      loaded_has_loop_ = false;
+      loaded_has_loop_set_ = false;
+      YAML::Node metadata = root["metadata"];
+      if (metadata && metadata.IsMap()) {
+        loaded_route_name_ = trimCopy_(nodeScalarOr_(metadata["name"], std::string()));
+        loaded_route_description_ = trimCopy_(nodeScalarOr_(metadata["description"], std::string()));
+        if (metadata["has_loop"] && metadata["has_loop"].IsScalar()) {
+          loaded_has_loop_ = parseBoolNode_(metadata["has_loop"], false);
+          loaded_has_loop_set_ = true;
+        }
+      }
+
       waypoints_.clear();
 
       // loop through waypoints
@@ -455,7 +1013,7 @@ private:
           nav_error_code_ = nav2_msgs::action::NavigateToPose::Result::UNKNOWN;
           nav_error_msg_ = "Goal rejected by action server";
           status_message_ = "Goal rejected by action server";
-          publishMetrics_();
+          finish();
         } else {
           current_goal_ = gh;
         }
@@ -568,11 +1126,12 @@ private:
     if (!has_error) {
       looper_state_ = LooperMetrics::LOOPER_FINISHED;
       status_message_ = single_goal_mode_ ? "Single goal complete" : "Waypoint loop complete";
+      distance_remaining_ = 0.0;
     } else if (status_message_.empty()) {
       status_message_ = "Waypoint loop failed";
     }
-    distance_remaining_ = 0.0;
     eta_msg_.sec = 0; eta_msg_.nanosec = 0;
+    finalizeRunHistory_(has_error ? "FAILED" : "SUCCEEDED", has_error ? determineFailureCauseCode_() : "ROUTE_COMPLETED");
     publishMetrics_();
 
     if (has_error) {
@@ -641,8 +1200,13 @@ private:
 
   // other members
   int wait_ms_descriptor_;
+  int history_cap_ = 15;
   std::string yaml_file_, frame_id_, action_name_;
+  std::string history_dir_;
+  std::string history_file_name_;
+  std::string history_file_path_;
   bool stop_on_fail_;
+  bool has_loop_param_ = false;
 
   bool running_, goal_in_flight_;
   bool paused_ = false;
@@ -655,6 +1219,26 @@ private:
   inline int    effective_delay_ms()    const { return single_goal_mode_ ? 0 : wait_ms_descriptor_; }
 
   std::vector<std::pair<std::string, geometry_msgs::msg::PoseStamped>> waypoints_;
+  std::string active_yaml_file_;
+  std::string loaded_route_name_;
+  std::string loaded_route_description_;
+  bool loaded_has_loop_ = false;
+  bool loaded_has_loop_set_ = false;
+
+  bool run_context_active_ = false;
+  uint64_t run_started_at_ms_ = 0;
+  uint32_t run_pause_count_ = 0;
+  uint32_t run_route_waypoints_ = 0;
+  bool run_has_loop_ = false;
+  uint32_t run_loop_count_ = 1;
+  int32_t run_wait_ms_ = 0;
+  std::string run_yaml_file_;
+  std::string run_route_name_;
+  std::string run_route_description_;
+  std::string run_id_;
+
+  mutable std::mutex run_history_mutex_;
+  std::vector<RunHistoryEntryMsg> run_history_entries_;
 
   bool have_last_odom_ = false;
   geometry_msgs::msg::Point last_odom_p_{};
@@ -681,6 +1265,9 @@ private:
   rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr nav_to_pose_client_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr
   start_srv_, cancel_srv_, pause_srv_, resume_srv_, publish_loaded_waypoints_srv_;
+  rclcpp::Service<RunHistoryListSrv>::SharedPtr run_history_list_srv_;
+  rclcpp::Service<RunHistoryDeleteSrv>::SharedPtr run_history_delete_srv_;
+  rclcpp::Service<RunHistoryClearSrv>::SharedPtr run_history_clear_srv_;
   rclcpp::TimerBase::SharedPtr delay_timer_;
   rclcpp_action::ClientGoalHandle<nav2_msgs::action::NavigateToPose>::SharedPtr current_goal_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
