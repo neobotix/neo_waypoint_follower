@@ -226,7 +226,7 @@ Minimal, production-ready waypoint vault utilities bundled with `neo_waypoint_fo
 
 - Owns a simple on-disk vault directory for waypoint YAMLs.
 - Provides services to list, save, load into the looper (params only), and preview waypoints to a latched topic.
-- Saves route-level metadata (`name`, `description`) together with waypoints in one YAML write.
+- Saves route-level metadata (`name`, `description`, `has_loop`, `loop_count`, `wait_at_waypoint_ms`) together with waypoints in one YAML write.
 - Preserves route sequence by writing waypoints in Marker ID order (avoids `wp_1, wp_10, wp_2` lexicographic jumps).
 
 ### Defaults
@@ -246,9 +246,9 @@ Minimal, production-ready waypoint vault utilities bundled with `neo_waypoint_fo
 - Services:
   - `/vault/list` (`neo_waypoint_follower/srv/VaultList`)
     - Request: empty
-    - Response: `bool success`, `string message`, `string[] filenames`, `int32[] points`, `bool[] has_loop`, `string[] names`, `string[] descriptions`
+    - Response: `bool success`, `string message`, `string[] filenames`, `int32[] points`, `bool[] has_loop`, `int32[] loop_count`, `int32[] wait_ms`, `string[] names`, `string[] descriptions`
   - `/vault/save_current` (`neo_waypoint_follower/srv/VaultSaveCurrent`)
-    - Request: `string filename`, `bool allow_overwrite`, `string name`, `string description`
+    - Request: `string filename`, `bool allow_overwrite`, `string name`, `string description`, `bool has_loop`, `int32 loop_count`, `int32 wait_ms`
     - Response: `bool success`, `string message`
     - Behavior: reads latest MarkerArray from `waypoints_topic`, writes `<vault_dir>/<filename>.yaml` with `metadata` + `waypoints` in one pass
   - `/vault/load_to_looper` (`neo_waypoint_follower/srv/VaultLoadToLooper`)
@@ -279,6 +279,9 @@ Minimal, production-ready waypoint vault utilities bundled with `neo_waypoint_fo
 metadata:
   name: Warehouse Patrol
   description: Nightly perimeter route
+  has_loop: true
+  loop_count: 3
+  wait_at_waypoint_ms: 500
 waypoints:
   point_1:
     position: {x: 0.0, y: 0.0, z: 0.0}
@@ -298,7 +301,7 @@ waypoints:
 - Save current waypoints with metadata:
   ```sh
   ros2 service call /vault/save_current neo_waypoint_follower/srv/VaultSaveCurrent \
-    "{filename: patrol_a, allow_overwrite: true, name: 'Warehouse Patrol', description: 'Night route'}"
+    "{filename: patrol_a, allow_overwrite: true, name: 'Warehouse Patrol', description: 'Night route', has_loop: true, loop_count: 3, wait_ms: 500}"
   ```
 
 - Load into looper (set params only):

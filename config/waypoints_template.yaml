@@ -9,6 +9,9 @@
 # metadata:
 #   name: "Warehouse Patrol"
 #   description: "Nightly perimeter route"
+#   has_loop: true
+#   loop_count: 3
+#   wait_at_waypoint_ms: 500
 
 waypoints:
     # wp_1:

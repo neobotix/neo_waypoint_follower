@@ -114,6 +114,10 @@ public:
   }
 
 private:
+  static constexpr int kDefaultLoopCount = 10;
+  static constexpr int kDefaultWaitMs = 500;
+  static constexpr int kUnspecifiedInt = -1;
+
   static std::string trim_(const std::string &s)
   {
     const auto begin = s.find_first_not_of(" \t\r\n");
@@ -122,6 +126,24 @@ private:
     }
     const auto end = s.find_last_not_of(" \t\r\n");
     return s.substr(begin, end - begin + 1);
+  }
+
+  static bool parseBoolScalar_(const YAML::Node &n, bool &out)
+  {
+    if (!n || !n.IsScalar()) {
+      return false;
+    }
+    try {
+      out = n.as<bool>();
+      return true;
+    } catch (...) {
+      try {
+        out = (n.as<int>() != 0);
+        return true;
+      } catch (...) {
+        return false;
+      }
+    }
   }
 
   // Validates a base filename and appends .yaml if missing.
@@ -234,6 +256,9 @@ private:
     const fs::path &path,
     const std::string &route_name,
     const std::string &description,
+    bool has_loop,
+    int loop_count,
+    int wait_ms,
     const std::vector<std::pair<std::string, geometry_msgs::msg::Pose>> &waypoints) const
   {
     std::ofstream fout(path);
@@ -247,6 +272,13 @@ private:
     out << YAML::Key << "metadata" << YAML::Value << YAML::BeginMap;
     out << YAML::Key << "name" << YAML::Value << route_name;
     out << YAML::Key << "description" << YAML::Value << description;
+    out << YAML::Key << "has_loop" << YAML::Value << has_loop;
+    if (loop_count > 0) {
+      out << YAML::Key << "loop_count" << YAML::Value << loop_count;
+    }
+    if (wait_ms >= 0) {
+      out << YAML::Key << "wait_at_waypoint_ms" << YAML::Value << wait_ms;
+    }
     out << YAML::EndMap;
 
     out << YAML::Key << "waypoints" << YAML::Value << YAML::BeginMap;
@@ -285,19 +317,55 @@ private:
     const fs::path &path,
     std::vector<std::pair<std::string, geometry_msgs::msg::PoseStamped>> &out,
     std::string *route_name = nullptr,
-    std::string *description = nullptr) const
+    std::string *description = nullptr,
+    bool *has_loop = nullptr,
+    bool *has_loop_set = nullptr,
+    int *loop_count = nullptr,
+    int *wait_ms = nullptr) const
   {
     try {
       YAML::Node root = YAML::LoadFile(path.string());
 
-      if (route_name || description) {
-        YAML::Node metadata = root["metadata"];
-        if (metadata && metadata.IsMap()) {
-          if (route_name && metadata["name"] && metadata["name"].IsScalar()) {
-            *route_name = trim_(metadata["name"].as<std::string>());
+      if (has_loop_set) {
+        *has_loop_set = false;
+      }
+
+      YAML::Node metadata = root["metadata"];
+      if (metadata && metadata.IsMap()) {
+        if (route_name && metadata["name"] && metadata["name"].IsScalar()) {
+          *route_name = trim_(metadata["name"].as<std::string>());
+        }
+        if (description && metadata["description"] && metadata["description"].IsScalar()) {
+          *description = trim_(metadata["description"].as<std::string>());
+        }
+        if (has_loop) {
+          bool parsed = false;
+          parsed = parseBoolScalar_(metadata["has_loop"], *has_loop);
+          if (parsed && has_loop_set) {
+            *has_loop_set = true;
           }
-          if (description && metadata["description"] && metadata["description"].IsScalar()) {
-            *description = trim_(metadata["description"].as<std::string>());
+        }
+        if (loop_count && metadata["loop_count"] && metadata["loop_count"].IsScalar()) {
+          try {
+            *loop_count = metadata["loop_count"].as<int>();
+          } catch (...) {
+            // Ignore malformed scalar and keep caller-provided fallback.
+          }
+        }
+        if (wait_ms) {
+          if (metadata["wait_at_waypoint_ms"] && metadata["wait_at_waypoint_ms"].IsScalar()) {
+            try {
+              *wait_ms = metadata["wait_at_waypoint_ms"].as<int>();
+            } catch (...) {
+              // Ignore malformed scalar and keep caller-provided fallback.
+            }
+          } else if (metadata["wait_ms"] && metadata["wait_ms"].IsScalar()) {
+            // Backward-compat for experimental schema drafts that used wait_ms.
+            try {
+              *wait_ms = metadata["wait_ms"].as<int>();
+            } catch (...) {
+              // Ignore malformed scalar and keep caller-provided fallback.
+            }
           }
         }
       }
@@ -382,6 +450,8 @@ private:
     res->filenames.clear();
     res->points.clear();
     res->has_loop.clear();
+    res->loop_count.clear();
+    res->wait_ms.clear();
     res->names.clear();
     res->descriptions.clear();
 
@@ -410,21 +480,40 @@ private:
     for (const auto &p : yaml_files) {
       std::vector<std::pair<std::string, geometry_msgs::msg::PoseStamped>> tmp;
       int count = 0;
-      bool loop = false;
+      bool geometric_loop = false;
       std::string route_name;
       std::string route_description;
+      bool metadata_has_loop = false;
+      bool metadata_has_loop_set = false;
+      int metadata_loop_count = kUnspecifiedInt;
+      int metadata_wait_ms = kUnspecifiedInt;
 
-      if (loadWaypointsFromYaml_(p, tmp, &route_name, &route_description)) {
-        computeStats_(tmp, count, loop);
+      if (loadWaypointsFromYaml_(
+        p,
+        tmp,
+        &route_name,
+        &route_description,
+        &metadata_has_loop,
+        &metadata_has_loop_set,
+        &metadata_loop_count,
+        &metadata_wait_ms))
+      {
+        computeStats_(tmp, count, geometric_loop);
       }
 
       if (route_name.empty()) {
         route_name = p.stem().string();
       }
 
+      const bool effective_has_loop = metadata_has_loop_set ? metadata_has_loop : geometric_loop;
+      const int effective_loop_count = metadata_loop_count > 0 ? metadata_loop_count : kUnspecifiedInt;
+      const int effective_wait_ms = metadata_wait_ms >= 0 ? metadata_wait_ms : kUnspecifiedInt;
+
       res->filenames.push_back(p.filename().string());
       res->points.push_back(count);
-      res->has_loop.push_back(loop);
+      res->has_loop.push_back(effective_has_loop);
+      res->loop_count.push_back(effective_loop_count);
+      res->wait_ms.push_back(effective_wait_ms);
       res->names.push_back(route_name);
       res->descriptions.push_back(route_description);
     }
@@ -471,8 +560,11 @@ private:
       route_name = fs::path(fname).stem().string();
     }
     const std::string description = trim_(req->description);
+    const bool has_loop = req->has_loop;
+    const int loop_count = req->loop_count > 0 ? static_cast<int>(req->loop_count) : kDefaultLoopCount;
+    const int wait_ms = req->wait_ms >= 0 ? static_cast<int>(req->wait_ms) : kDefaultWaitMs;
 
-    if (!writeVaultYaml_(path, route_name, description, waypoints)) {
+    if (!writeVaultYaml_(path, route_name, description, has_loop, loop_count, wait_ms, waypoints)) {
       res->success = false;
       res->message = "Failed to write YAML: " + path.string();
       return;
@@ -517,7 +609,19 @@ private:
 
     {
       auto fut = looper_set_params_client_->async_send_request(req_set);
-      (void)fut.get();
+      const auto resp = fut.get();
+      if (!resp) {
+        res->success = false;
+        res->message = "SetParameters call failed: empty response";
+        return;
+      }
+      for (const auto &result : resp->results) {
+        if (!result.successful) {
+          res->success = false;
+          res->message = "SetParameters rejected by looper: " + result.reason;
+          return;
+        }
+      }
     }
 
     res->success = true;
@@ -653,7 +757,20 @@ private:
     std::vector<std::pair<std::string, geometry_msgs::msg::PoseStamped>> waypoints;
     std::string existing_name;
     std::string existing_desc;
-    if (!loadWaypointsFromYaml_(old_path, waypoints, &existing_name, &existing_desc)) {
+    bool existing_has_loop = false;
+    bool existing_has_loop_set = false;
+    int existing_loop_count = kUnspecifiedInt;
+    int existing_wait_ms = kUnspecifiedInt;
+    if (!loadWaypointsFromYaml_(
+      old_path,
+      waypoints,
+      &existing_name,
+      &existing_desc,
+      &existing_has_loop,
+      &existing_has_loop_set,
+      &existing_loop_count,
+      &existing_wait_ms))
+    {
       res->success = false;
       res->message = "Failed to parse existing YAML: " + old_fname;
       return;
@@ -662,6 +779,14 @@ private:
     // Update metadata
     const std::string updated_name = new_name;
     const std::string updated_desc = trim_(req->new_description);
+    int geometric_points = 0;
+    bool geometric_loop = false;
+    computeStats_(waypoints, geometric_points, geometric_loop);
+    (void)geometric_points;
+
+    const bool updated_has_loop = existing_has_loop_set ? existing_has_loop : geometric_loop;
+    const int updated_loop_count = existing_loop_count > 0 ? existing_loop_count : kUnspecifiedInt;
+    const int updated_wait_ms = existing_wait_ms >= 0 ? existing_wait_ms : kUnspecifiedInt;
 
     // Convert PoseStamped vector to Pose vector for writeVaultYaml_
     std::vector<std::pair<std::string, geometry_msgs::msg::Pose>> pose_vec;
@@ -680,7 +805,15 @@ private:
 
     // Write updated YAML to the target path
     const fs::path write_path = needs_file_rename ? new_path : old_path;
-    if (!writeVaultYaml_(write_path, updated_name, updated_desc, pose_vec)) {
+    if (!writeVaultYaml_(
+      write_path,
+      updated_name,
+      updated_desc,
+      updated_has_loop,
+      updated_loop_count,
+      updated_wait_ms,
+      pose_vec))
+    {
       res->success = false;
       res->message = "Failed to write YAML: " + write_path.string();
       return;

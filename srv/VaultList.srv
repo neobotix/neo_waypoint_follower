@@ -7,3 +7,5 @@ string[] names
 string[] descriptions
 int32[] points
 bool[] has_loop
+int32[] loop_count
+int32[] wait_ms
