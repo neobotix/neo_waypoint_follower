@@ -58,7 +58,7 @@ It provides two core functionalities:
   - `/resume_waypoint_loop` (`std_srvs/srv/Trigger`): Resumes the waypoint loop
   - `/cancel_waypoint_loop` (`std_srvs/srv/Trigger`): Cancels and resets the waypoint loop
   - `/publish_loaded_waypoints` (`std_srvs/srv/Trigger`): Publishes the currently loaded waypoints once to a latched topic
-  - `/run_history/list` (`neo_waypoint_follower/srv/RunHistoryList`): Lists persisted navigation runs
+  - `/run_history/list` (`neo_waypoint_follower/srv/RunHistoryList`): Lists navigation runs. If persistence backend is degraded, service returns `success=false` with an error `message` but may still include last-known in-memory `entries`.
   - `/run_history/delete` (`neo_waypoint_follower/srv/RunHistoryDelete`): Deletes one run by `run_id`
   - `/run_history/clear` (`neo_waypoint_follower/srv/RunHistoryClear`): Clears all run history entries
 
@@ -258,14 +258,14 @@ Minimal, production-ready waypoint vault utilities bundled with `neo_waypoint_fo
 
 ### Defaults
 
-- Vault directory: `/var/lib/neo/waypoints`
+- Vault directory: `/var/lib/neo/lemma-gui/waypoints`
 - Preview topic: `/vault/preview_waypoints` (QoS: reliable, transient_local)
 - Works alongside existing nodes: `save_waypoints_server` and `waypoint_looper`.
 
 ### Node: `vault_manager`
 
 - Parameters:
-  - `vault_dir` (string, default: `/var/lib/neo/waypoints`): Base directory that stores waypoint YAML files.
+  - `vault_dir` (string, default: `/var/lib/neo/lemma-gui/waypoints`): Base directory that stores waypoint YAML files.
   - `looper_node` (string, default: `/waypoint_looper`): Target node name for setting `yaml_file` (and optional loop params).
   - `frame_id` (string, default: `map`): Frame used when previewing waypoints.
   - `waypoints_topic` (string, default: `/waypoints`): MarkerArray topic cached for `/vault/save_current`.
@@ -360,7 +360,7 @@ waypoints:
 
 ```sh
 ros2 launch neo_waypoint_follower waypoint_follower_launch.py \
-  vault_dir:=/var/lib/neo/waypoints
+  vault_dir:=/var/lib/neo/lemma-gui/waypoints
 ```
 
 ---

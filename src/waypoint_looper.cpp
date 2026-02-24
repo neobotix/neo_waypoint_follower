@@ -22,6 +22,7 @@
 #include <chrono>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <ctime>
 #include <iomanip>
 #include <fstream>
@@ -66,7 +67,11 @@ public:
     loop_idx_(0), // current loop iteration
     wp_idx_(0) // current waypoint index
   {
-    yaml_file_    = declare_parameter<std::string>("yaml_file", std::string(getenv("HOME")) + "/waypoints.yaml");
+    const char *home = std::getenv("HOME");
+    const std::string default_yaml_file = home != nullptr
+      ? std::string(home) + "/waypoints.yaml"
+      : "/tmp/waypoints.yaml";
+    yaml_file_    = declare_parameter<std::string>("yaml_file", default_yaml_file);
     frame_id_     = declare_parameter<std::string>("frame_id", "map");
     has_loop_param_ = declare_parameter<bool>("has_loop", false);
     
@@ -101,6 +106,7 @@ public:
     history_dir_ = declare_parameter<std::string>("history_dir", "/var/lib/neo/lemma-gui/history");
     history_file_name_ = declare_parameter<std::string>("history_file", "navigation_runs.json");
     history_file_path_ = (fs::path(history_dir_) / history_file_name_).string();
+    checkRunHistoryStorageWritable_();
     
     action_name_  = declare_parameter<std::string>("action_name", "/navigate_to_pose");
     stop_on_fail_ = declare_parameter<bool>("stop_on_failure", true);
@@ -240,6 +246,58 @@ public:
   }
 
 private:
+  // REQUIRES: run_history_mutex_ held.
+  void setRunHistoryStorageStatusLocked_(bool ready, const std::string &reason = std::string())
+  {
+    run_history_storage_ready_ = ready;
+    run_history_storage_error_ = reason;
+  }
+
+  void checkRunHistoryStorageWritable_()
+  {
+    std::error_code ec;
+    fs::create_directories(history_dir_, ec);
+    if (ec) {
+      std::lock_guard<std::mutex> lock(run_history_mutex_);
+      setRunHistoryStorageStatusLocked_(
+        false,
+        "Cannot create history directory '" + history_dir_ + "': " + ec.message());
+      RCLCPP_WARN(get_logger(), "%s", run_history_storage_error_.c_str());
+      return;
+    }
+
+    const fs::path probe = fs::path(history_dir_) / ".run_history_write_probe.tmp";
+    try {
+      std::lock_guard<std::mutex> lock(run_history_mutex_);
+      std::ofstream fout(probe, std::ios::out | std::ios::trunc);
+      if (!fout.is_open()) {
+        setRunHistoryStorageStatusLocked_(
+          false,
+          "Cannot write probe file in history directory '" + history_dir_ + "'");
+        RCLCPP_WARN(get_logger(), "%s", run_history_storage_error_.c_str());
+        return;
+      }
+      fout << "probe\n";
+      fout.close();
+      if (!fout) {
+        setRunHistoryStorageStatusLocked_(
+          false,
+          "Failed while writing probe file in history directory '" + history_dir_ + "'");
+        RCLCPP_WARN(get_logger(), "%s", run_history_storage_error_.c_str());
+        return;
+      }
+      std::error_code rm_ec;
+      fs::remove(probe, rm_ec);
+      setRunHistoryStorageStatusLocked_(true);
+    } catch (const std::exception &e) {
+      std::lock_guard<std::mutex> lock(run_history_mutex_);
+      setRunHistoryStorageStatusLocked_(
+        false,
+        "History directory write probe failed for '" + history_dir_ + "': " + std::string(e.what()));
+      RCLCPP_WARN(get_logger(), "%s", run_history_storage_error_.c_str());
+    }
+  }
+
   static std::string trimCopy_(const std::string &value)
   {
     const auto first = value.find_first_not_of(" \t\r\n");
@@ -473,26 +531,52 @@ private:
   {
     std::lock_guard<std::mutex> lock(run_history_mutex_);
     try {
-      fs::create_directories(history_dir_);
+      std::error_code mk_ec;
+      fs::create_directories(history_dir_, mk_ec);
+      if (mk_ec) {
+        setRunHistoryStorageStatusLocked_(
+          false,
+          "Cannot create history directory '" + history_dir_ + "': " + mk_ec.message());
+        return false;
+      }
       const fs::path target(history_file_path_);
       const fs::path temp = target.string() + ".tmp";
       std::ofstream fout(temp, std::ios::out | std::ios::trunc);
       if (!fout.is_open()) {
+        setRunHistoryStorageStatusLocked_(
+          false,
+          "Cannot open run history temp file '" + temp.string() + "' for writing");
         return false;
       }
       fout << runHistoryToJson_();
       fout.close();
       if (!fout) {
+        setRunHistoryStorageStatusLocked_(
+          false,
+          "Failed while writing run history temp file '" + temp.string() + "'");
         return false;
       }
-      std::error_code ec;
-      fs::rename(temp, target, ec);
-      if (ec) {
-        fs::remove(temp, ec);
+      std::error_code rename_ec;
+      fs::rename(temp, target, rename_ec);
+      if (rename_ec) {
+        std::error_code remove_ec;
+        fs::remove(temp, remove_ec);
+        setRunHistoryStorageStatusLocked_(
+          false,
+          "Failed to rename run history temp file into '" + history_file_path_ + "': " + rename_ec.message());
         return false;
       }
+      setRunHistoryStorageStatusLocked_(true);
       return true;
+    } catch (const std::exception &e) {
+      setRunHistoryStorageStatusLocked_(
+        false,
+        "Run history persistence exception for '" + history_file_path_ + "': " + std::string(e.what()));
+      return false;
     } catch (...) {
+      setRunHistoryStorageStatusLocked_(
+        false,
+        "Unknown run history persistence failure for '" + history_file_path_ + "'");
       return false;
     }
   }
@@ -634,8 +718,15 @@ private:
     std::shared_ptr<RunHistoryListSrv::Response> res)
   {
     std::lock_guard<std::mutex> lock(run_history_mutex_);
-    res->success = true;
-    res->message = "OK";
+    if (!run_history_storage_ready_) {
+      res->success = false;
+      res->message = run_history_storage_error_.empty()
+        ? "Run history storage unavailable"
+        : run_history_storage_error_;
+    } else {
+      res->success = true;
+      res->message = "OK";
+    }
     res->cap = static_cast<uint32_t>(std::max(0, history_cap_));
     res->entries = run_history_entries_;
   }
@@ -1239,6 +1330,8 @@ private:
 
   mutable std::mutex run_history_mutex_;
   std::vector<RunHistoryEntryMsg> run_history_entries_;
+  bool run_history_storage_ready_ = true;
+  std::string run_history_storage_error_;
 
   bool have_last_odom_ = false;
   geometry_msgs::msg::Point last_odom_p_{};

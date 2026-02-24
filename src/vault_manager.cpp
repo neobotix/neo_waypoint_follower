@@ -47,7 +47,7 @@ public:
   VaultManager()
   : rclcpp::Node("vault_manager")
   {
-    vault_dir_ = declare_parameter<std::string>("vault_dir", "/var/lib/neo/waypoints");
+    vault_dir_ = declare_parameter<std::string>("vault_dir", "/var/lib/neo/lemma-gui/waypoints");
     looper_node_name_ = declare_parameter<std::string>("looper_node", "/waypoint_looper");
     frame_id_ = declare_parameter<std::string>("frame_id", "map");
     waypoints_topic_ = declare_parameter<std::string>("waypoints_topic", "/waypoints");
