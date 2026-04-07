@@ -1,5 +1,5 @@
 # Neobotix GmbH
-# Author: Adarsh Karan K P 
+# Author: Adarsh Karan K P
 
 import launch
 from ament_index_python.packages import get_package_share_directory
@@ -9,19 +9,22 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 import os
 
-def execution_stage(context, 
-                    waypoints_topic, 
-                    save_waypoints_path, 
-                    load_waypoints_path, 
-                    frame_id, 
-                    repeat_count, 
-                    wait_at_waypoint_ms, 
+
+def execution_stage(context,
+                    waypoints_topic,
+                    save_waypoints_path,
+                    load_waypoints_path,
+                    vault_dir,
+                    frame_id,
+                    repeat_count,
+                    wait_at_waypoint_ms,
                     stop_on_failure
                     ):
 
     waypoints_topic_val = str(waypoints_topic.perform(context))
     save_waypoints_path_val = str(save_waypoints_path.perform(context))
     load_waypoints_path_val = str(load_waypoints_path.perform(context))
+    vault_dir_val = str(vault_dir.perform(context))
     frame_id_val = frame_id.perform(context)
     repeat_count_val = int(repeat_count.perform(context))
     wait_at_waypoint_ms_val = int(wait_at_waypoint_ms.perform(context))
@@ -52,9 +55,23 @@ def execution_stage(context,
         }]
     )
 
+    vault_manager_node = Node(
+        package='neo_waypoint_follower',
+        executable='vault_manager',
+        name='vault_manager',
+        output='screen',
+        parameters=[{
+            'vault_dir': vault_dir_val,
+            'looper_node': '/waypoint_looper',
+            'frame_id': frame_id_val,
+            'waypoints_topic': waypoints_topic_val
+        }]
+    )
+
     return [
         save_waypoints_server_node,
-        waypoint_looper_node
+        waypoint_looper_node,
+        vault_manager_node
     ]
 
 
@@ -91,8 +108,13 @@ def generate_launch_description():
         description='Frame ID for waypoints'
     )
 
+    declare_vault_dir = DeclareLaunchArgument(
+        'vault_dir', default_value='/var/lib/neo/lemma-gui/waypoints',
+        description='Path for persistent waypoint vault YAML files'
+    )
+
     declare_repeat_count = DeclareLaunchArgument(
-        'repeat_count', default_value='100',
+        'repeat_count', default_value='10',
         description='Number of times to repeat the loop'
     )
 
@@ -111,6 +133,7 @@ def generate_launch_description():
                                       LaunchConfiguration('waypoints_topic'),
                                       LaunchConfiguration('save_waypoints_path'),
                                       LaunchConfiguration('load_waypoints_path'),
+                                      LaunchConfiguration('vault_dir'),
                                       LaunchConfiguration('frame_id'),
                                       LaunchConfiguration('repeat_count'),
                                       LaunchConfiguration('wait_at_waypoint_ms'),
@@ -121,6 +144,7 @@ def generate_launch_description():
         declare_waypoints_topic,
         declare_save_waypoints_path,
         declare_load_waypoints_path,
+        declare_vault_dir,
         declare_frame_id,
         declare_repeat_count,
         declare_wait_at_waypoint_ms,

@@ -2,8 +2,17 @@
 # Template for defining waypoints.
 # Copy this file and fill in your own waypoints.
 # Each waypoint has a unique name, position (x, y, z) and orientation (x, y, z, w).
-# Make sure the name of each waypoint follows the convention 'wp_n', where n is the index (e.g., wp_1, wp_2) 
+# Make sure the name of each waypoint follows the convention 'wp_n', where n is the index (e.g., wp_1, wp_2)
 # This is required for compatibility with nav2.
+#
+# Optional route-level metadata for quick reference:
+# metadata:
+#   name: "Warehouse Patrol"
+#   description: "Nightly perimeter route"
+#   has_loop: true
+#   loop_count: 3
+#   wait_at_waypoint_ms: 500
+
 waypoints:
     # wp_1:
     #   position:

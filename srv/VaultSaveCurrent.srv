@@ -1,0 +1,13 @@
+# Request
+string filename
+string name
+string description
+bool allow_overwrite
+bool has_loop
+int32 loop_count
+int32 wait_ms
+
+# Response
+---
+bool success
+string message

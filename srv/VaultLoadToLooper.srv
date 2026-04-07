@@ -1,0 +1,9 @@
+# Request
+string filename        # base name or name.yaml in vault directory
+bool set_loop_params
+int32 loop_count       # used when set_loop_params==true
+int32 wait_ms          # used when set_loop_params==true
+---
+bool success
+string message
+
